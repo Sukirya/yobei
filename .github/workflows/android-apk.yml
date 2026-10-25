@@ -1,4 +1,4 @@
-name: Android APK (debug)
+name: CI
 
 # Modeled on the reference project's proven CI layout (committed
 # src-tauri/gen project, setup-android, sdkmanager package pins),
@@ -19,6 +19,52 @@ on:
       - "docs/**"
 
 jobs:
+  # The reference project's CI built but never ran its tests (DESIGN.md
+  # section 6) - ours runs the core suite on every push.
+  test-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/yobei-core -> target
+
+      - name: Run core tests
+        run: cargo test -p yobei-core
+
+  # Windows is platform priority #2: keep the desktop shell compiling
+  # there even before release builds are wired up.
+  windows-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+
+      - name: Install dependencies and build frontend
+        run: |
+          bun install
+          bun run build
+
+      - name: Type-check the Tauri shell on Windows
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
   build-android:
     runs-on: ubuntu-latest
     steps:
