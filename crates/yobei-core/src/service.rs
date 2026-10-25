@@ -69,14 +69,56 @@ impl Service {
             record.account = Some(AccountData::default());
         }
         record.hlc = now_ms.max(0) as u64;
-        self.vault.put(&record)?;
+        self.put_and_enqueue(&record, 0, now_ms)?;
         Ok(record)
     }
 
     /// Save an edited record: applies touch discipline, then persists.
     pub fn save_record(&mut self, record: &mut Record, now_ms: i64) -> Result<(), String> {
+        let base_version = record.version;
         touch(record, now_ms);
-        self.vault.put(record)
+        self.put_and_enqueue(record, base_version, now_ms)
+    }
+
+    /// Persist a record and enqueue its sync op in the outbox. Every
+    /// mutation goes through here, so the outbox is always a complete,
+    /// ordered history the sync engine can replay when a server is
+    /// configured — sync never blocks local use.
+    fn put_and_enqueue(
+        &mut self,
+        record: &Record,
+        base_version: u64,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        self.vault.put(record)?;
+        let (kind, ciphertext_b64, nonce_b64) = if record.deleted {
+            (crate::sync::SyncOpKind::Delete, String::new(), String::new())
+        } else {
+            let blob = self
+                .vault
+                .get_blob(&record.id)?
+                .ok_or_else(|| "record vanished after put".to_string())?;
+            if blob.len() <= 24 {
+                return Err("stored blob too short".to_string());
+            }
+            (
+                crate::sync::SyncOpKind::Upsert,
+                data_encoding::BASE64.encode(&blob[24..]),
+                data_encoding::BASE64.encode(&blob[..24]),
+            )
+        };
+        let op = crate::sync::SyncOp {
+            op_id: Vault::new_id(),
+            vault_id: self.vault_id().to_string(),
+            record_id: record.id.clone(),
+            base_version,
+            new_version: record.version,
+            hlc: record.hlc,
+            kind,
+            ciphertext_b64,
+            nonce_b64,
+        };
+        self.vault.enqueue_op(&op, now_ms)
     }
 
     pub fn get_record(&self, id: &str) -> Result<Option<Record>, String> {
@@ -127,8 +169,24 @@ impl Service {
         self.save_record(&mut record, now_ms)
     }
 
-    /// Delete permanently (row removed, no tombstone).
+    /// Delete permanently (row removed, no tombstone). If the record was
+    /// ever synced, a delete op is queued so the server tombstones it
+    /// too; the op carries the version chain the server expects.
     pub fn purge(&mut self, id: &str) -> Result<(), String> {
+        if let Some(record) = self.vault.get(id)? {
+            let op = crate::sync::SyncOp {
+                op_id: Vault::new_id(),
+                vault_id: self.vault_id().to_string(),
+                record_id: id.to_string(),
+                base_version: record.version,
+                new_version: record.version + 1,
+                hlc: record.hlc + 1,
+                kind: crate::sync::SyncOpKind::Delete,
+                ciphertext_b64: String::new(),
+                nonce_b64: String::new(),
+            };
+            self.vault.enqueue_op(&op, record.updated_at_ms)?;
+        }
         self.vault.purge(id)
     }
 
@@ -149,7 +207,7 @@ impl Service {
             record.version = 1;
             record.hlc = now_ms.max(0) as u64;
             record.deleted = false;
-            self.vault.put(&record)?;
+            self.put_and_enqueue(&record, 0, now_ms)?;
             count += 1;
         }
         Ok(count)
@@ -158,6 +216,27 @@ impl Service {
     /// All live records (used by exports).
     pub fn all_records(&self) -> Result<Vec<Record>, String> {
         self.vault.list(false)
+    }
+
+    /// Preserve a divergent local record as a conflict copy (DESIGN.md
+    /// §4: conflicts are kept, never silently overwritten). The copy is a
+    /// brand-new record — new id, version 1, title suffixed — holding the
+    /// source's content; its create op is enqueued so it syncs too.
+    pub fn add_conflict_copy(
+        &mut self,
+        source: &Record,
+        now_ms: i64,
+    ) -> Result<Record, String> {
+        let mut copy = source.clone();
+        copy.id = Vault::new_id();
+        copy.title = format!("{}（冲突副本）", source.title);
+        copy.version = 1;
+        copy.created_at_ms = now_ms;
+        copy.updated_at_ms = now_ms;
+        copy.hlc = now_ms.max(0) as u64;
+        copy.deleted = false;
+        self.put_and_enqueue(&copy, 0, now_ms)?;
+        Ok(copy)
     }
 }
 

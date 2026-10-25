@@ -361,6 +361,140 @@ fn export_encrypted(
     })
 }
 
+// ---------------------------------------------------------------- sync ---
+
+/// HTTP adapter for the sync worker (workers/sync). Holds only the
+/// server URL and this device's token; all protocol decisions live in
+/// yobei-core's sync engine.
+struct HttpTransport {
+    base_url: String,
+    token: String,
+}
+
+impl HttpTransport {
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    }
+    fn auth(&self, req: ureq::Request) -> ureq::Request {
+        req.set("Authorization", &format!("Bearer {}", self.token))
+    }
+}
+
+impl yobei_core::ports::SyncTransportPort for HttpTransport {
+    fn push_ops(&self, vault_id: &str, ops_json: &str) -> Result<String, String> {
+        let resp = self
+            .auth(ureq::post(&self.url(&format!("/v1/vaults/{vault_id}/ops"))))
+            .set("Content-Type", "application/json")
+            .send_string(ops_json)
+            .map_err(|e| format!("sync push failed: {e}"))?;
+        resp.into_string()
+            .map_err(|e| format!("sync push: bad response: {e}"))
+    }
+
+    fn fetch_manifest(&self, vault_id: &str) -> Result<String, String> {
+        let resp = self
+            .auth(ureq::get(&self.url(&format!("/v1/vaults/{vault_id}/manifest"))))
+            .call()
+            .map_err(|e| format!("sync manifest failed: {e}"))?;
+        resp.into_string()
+            .map_err(|e| format!("sync manifest: bad response: {e}"))
+    }
+
+    fn fetch_record(&self, vault_id: &str, record_id: &str) -> Result<Vec<u8>, String> {
+        let resp = self
+            .auth(ureq::get(
+                &self.url(&format!("/v1/vaults/{vault_id}/records/{record_id}")),
+            ))
+            .call()
+            .map_err(|e| format!("sync fetch record failed: {e}"))?;
+        let mut buf = Vec::new();
+        use std::io::Read;
+        resp.into_reader()
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("sync fetch record: read failed: {e}"))?;
+        Ok(buf)
+    }
+}
+
+#[derive(Serialize)]
+struct SyncStatusDto {
+    configured: bool,
+    server_url: Option<String>,
+    device_id: Option<String>,
+    pending_ops: usize,
+}
+
+fn read_sync_status(service: &mut Service) -> SyncStatusDto {
+    let vault = service.vault_mut();
+    SyncStatusDto {
+        configured: vault.get_sync_state("sync_token").is_some(),
+        server_url: vault.get_sync_state("sync_server_url"),
+        device_id: vault.get_sync_state("sync_device_id"),
+        pending_ops: vault.outbox_ops().map(|ops| ops.len()).unwrap_or(0),
+    }
+}
+
+#[tauri::command]
+fn sync_status(state: State<'_, AppState>) -> Result<SyncStatusDto, String> {
+    with_service(&state, |service| Ok(read_sync_status(service)))
+}
+
+/// Register this device with the user's sync server and store the
+/// returned token in the vault's sync state.
+#[tauri::command]
+fn sync_configure(
+    state: State<'_, AppState>,
+    server_url: String,
+) -> Result<SyncStatusDto, String> {
+    with_service(&state, |service| {
+        let vault_id = service.vault_id().to_string();
+        let resp = ureq::post(&format!(
+            "{}/v1/devices",
+            server_url.trim_end_matches('/')
+        ))
+        .send_json(serde_json::json!({ "vault_id": vault_id }))
+        .map_err(|e| format!("device registration failed: {e}"))?;
+        let body: serde_json::Value = resp
+            .into_json()
+            .map_err(|e| format!("registration: bad response: {e}"))?;
+        let device_id = body["device_id"]
+            .as_str()
+            .ok_or("registration response missing device_id")?;
+        let token = body["token"]
+            .as_str()
+            .ok_or("registration response missing token")?;
+        let vault = service.vault_mut();
+        vault.set_sync_state("sync_server_url", server_url.trim_end_matches('/'))?;
+        vault.set_sync_state("sync_device_id", device_id)?;
+        vault.set_sync_state("sync_token", token)?;
+        Ok(read_sync_status(service))
+    })
+}
+
+#[tauri::command]
+fn sync_now(
+    state: State<'_, AppState>,
+) -> Result<yobei_core::syncengine::SyncReport, String> {
+    with_service(&state, |service| {
+        let (server_url, token) = {
+            let vault = service.vault_mut();
+            (
+                vault.get_sync_state("sync_server_url"),
+                vault.get_sync_state("sync_token"),
+            )
+        };
+        let (server_url, token) = match (server_url, token) {
+            (Some(u), Some(t)) => (u, t),
+            _ => return Err("sync is not configured yet".to_string()),
+        };
+        let transport = HttpTransport {
+            base_url: server_url,
+            token,
+        };
+        yobei_core::syncengine::sync_now(service, &transport, now_ms())
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -390,7 +524,10 @@ pub fn run() {
             import_execute,
             export_csv,
             export_json,
-            export_encrypted
+            export_encrypted,
+            sync_status,
+            sync_configure,
+            sync_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -90,7 +90,10 @@
     const s = await run(() => invoke<VaultStatus>("vault_status"));
     if (s) {
       status = s;
-      if (s.unlocked) await refreshRecords();
+      if (s.unlocked) {
+        await refreshRecords();
+        await refreshSyncStatus();
+      }
     }
   }
 
@@ -413,6 +416,49 @@
     if (text) expText = text;
   }
 
+  // --- sync ---
+  interface SyncStatusDto {
+    configured: boolean;
+    server_url: string | null;
+    device_id: string | null;
+    pending_ops: number;
+  }
+  interface SyncReport {
+    pushed: number;
+    duplicates: number;
+    pulled_new: number;
+    pulled_updated: number;
+    conflicts: number;
+    conflict_copies: number;
+  }
+  let syncUrl = $state("");
+  let syncStat = $state<SyncStatusDto | null>(null);
+  let syncMsg = $state("");
+
+  async function refreshSyncStatus() {
+    const s = await run(() => invoke<SyncStatusDto>("sync_status"));
+    if (s) syncStat = s;
+  }
+
+  async function doSyncConfigure() {
+    const s = await run(() =>
+      invoke<SyncStatusDto>("sync_configure", { serverUrl: syncUrl }),
+    );
+    if (s) {
+      syncStat = s;
+      syncMsg = "设备已注册，同步已配置";
+    }
+  }
+
+  async function doSyncNow() {
+    const r = await run(() => invoke<SyncReport>("sync_now"));
+    if (r) {
+      syncMsg = `同步完成：推送 ${r.pushed}，拉取新增 ${r.pulled_new}、更新 ${r.pulled_updated}，冲突 ${r.conflicts}（冲突副本 ${r.conflict_copies}）`;
+      await refreshRecords();
+      await refreshSyncStatus();
+    }
+  }
+
   function tagsText(): string {
     return selected?.tags.join(", ") ?? "";
   }
@@ -692,6 +738,35 @@
         {#if expText}
           <textarea rows="8" readonly value={expText}></textarea>
         {/if}
+      </section>
+
+      <section class="editor">
+        <h2>同步</h2>
+        {#if syncStat?.configured}
+          <p>
+            服务器：{syncStat.server_url}<br />
+            设备：{syncStat.device_id?.slice(0, 8)}… · 待推送操作：{syncStat.pending_ops}
+          </p>
+          <div class="row">
+            <button disabled={busy} onclick={doSyncNow}>立即同步</button>
+            <button onclick={refreshSyncStatus}>刷新状态</button>
+          </div>
+        {:else}
+          <div class="row">
+            <input
+              type="text"
+              placeholder="同步服务器地址（如 https://yobei-sync.xxx.workers.dev）"
+              bind:value={syncUrl}
+            />
+            <button disabled={!syncUrl.trim()} onclick={doSyncConfigure}>
+              注册本设备
+            </button>
+          </div>
+          <p class="warn">
+            服务器需自行部署（workers/sync），它只保存密文。注册后令牌只存本机保险库内。
+          </p>
+        {/if}
+        {#if syncMsg}<p>{syncMsg}</p>{/if}
       </section>
     </section>
   {/if}

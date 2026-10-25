@@ -22,6 +22,7 @@ pub mod record;
 pub mod secretkey;
 pub mod service;
 pub mod sync;
+pub mod syncengine;
 pub mod totp;
 pub mod transfer;
 pub mod vault;

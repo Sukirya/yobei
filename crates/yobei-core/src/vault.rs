@@ -37,6 +37,16 @@ pub struct VaultHeader {
     pub created_at_ms: i64,
 }
 
+/// Sync-relevant metadata of one stored row (no decryption needed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordMeta {
+    pub id: String,
+    pub version: u64,
+    pub hlc: u64,
+    pub updated_at_ms: i64,
+    pub deleted: bool,
+}
+
 /// An unlocked vault. Holds the vault key in memory (zeroized on drop);
 /// dropping the `Vault` is locking it.
 pub struct Vault {
@@ -96,7 +106,14 @@ impl Vault {
                  deleted INTEGER NOT NULL DEFAULT 0,
                  ciphertext BLOB NOT NULL
              );
-             CREATE INDEX idx_records_updated ON records(updated_at_ms);",
+             CREATE INDEX idx_records_updated ON records(updated_at_ms);
+             CREATE TABLE outbox (
+                 op_id TEXT PRIMARY KEY,
+                 record_id TEXT NOT NULL,
+                 op_json TEXT NOT NULL,
+                 created_at_ms INTEGER NOT NULL
+             );
+             CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )
         .map_err(|e| format!("init vault schema: {e}"))?;
 
@@ -156,6 +173,17 @@ impl Vault {
         )?;
         let vault_key = keys::unwrap_key(&kek, &header.wrapped_vault_key)
             .map_err(|_| "wrong password or secret key".to_string())?;
+        // Vaults created before the sync tables existed gain them here.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS outbox (
+                 op_id TEXT PRIMARY KEY,
+                 record_id TEXT NOT NULL,
+                 op_json TEXT NOT NULL,
+                 created_at_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .map_err(|e| format!("ensure sync schema: {e}"))?;
         Ok(Vault {
             conn,
             header,
@@ -184,6 +212,179 @@ impl Vault {
         self.conn
             .execute("DELETE FROM records WHERE id = ?1", params![id])
             .map_err(|e| format!("purge record: {e}"))?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ sync ---
+
+    /// Decrypt a blob with this vault's key (sync ingest verification).
+    pub fn decrypt(&self, record_id: &str, blob: &[u8]) -> Result<Record, String> {
+        keys::decrypt_record(&self.vault_key, record_id, blob)
+    }
+
+    /// The stored ciphertext blob for a record, exactly as pushed to and
+    /// fetched from the sync server (nonce ‖ ciphertext).
+    pub fn get_blob(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+        let blob: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT ciphertext FROM records WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(blob)
+    }
+
+    /// Sync metadata for every row, without decrypting anything.
+    pub fn record_metas(&self) -> Result<Vec<RecordMeta>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, version, hlc, updated_at_ms, deleted FROM records")
+            .map_err(|e| format!("prepare metas: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(RecordMeta {
+                    id: row.get(0)?,
+                    version: row.get::<_, i64>(1)? as u64,
+                    hlc: row.get::<_, i64>(2)? as u64,
+                    updated_at_ms: row.get(3)?,
+                    deleted: row.get::<_, i64>(4)? != 0,
+                })
+            })
+            .map_err(|e| format!("read metas: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("read meta row: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    /// Insert/replace a row from raw parts — the sync ingest path, where
+    /// the blob arrives from the server rather than from local encryption.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_raw(
+        &mut self,
+        record_id: &str,
+        kind: &RecordKind,
+        created_at_ms: i64,
+        updated_at_ms: i64,
+        version: u64,
+        hlc: u64,
+        deleted: bool,
+        blob: &[u8],
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO records (id, kind, created_at_ms, updated_at_ms, version, hlc, deleted, ciphertext)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(id) DO UPDATE SET kind = excluded.kind,
+                     created_at_ms = excluded.created_at_ms,
+                     updated_at_ms = excluded.updated_at_ms, version = excluded.version,
+                     hlc = excluded.hlc, deleted = excluded.deleted,
+                     ciphertext = excluded.ciphertext",
+                params![
+                    record_id,
+                    kind_to_str(kind),
+                    created_at_ms,
+                    updated_at_ms,
+                    version as i64,
+                    hlc as i64,
+                    deleted as i64,
+                    blob,
+                ],
+            )
+            .map_err(|e| format!("store raw record: {e}"))?;
+        Ok(())
+    }
+
+    /// Append an op to the local outbox. Ops are enqueued at mutation
+    /// time (see service.rs) and removed only when the server accepts
+    /// them (or a conflict resolution supersedes them).
+    pub fn enqueue_op(&mut self, op: &crate::sync::SyncOp, now_ms: i64) -> Result<(), String> {
+        let json = serde_json::to_string(op).map_err(|e| format!("serialize op: {e}"))?;
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO outbox (op_id, record_id, op_json, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![op.op_id, op.record_id, json, now_ms],
+            )
+            .map_err(|e| format!("enqueue op: {e}"))?;
+        Ok(())
+    }
+
+    /// All queued ops, oldest first (push order).
+    pub fn outbox_ops(&self) -> Result<Vec<crate::sync::SyncOp>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT op_json FROM outbox ORDER BY created_at_ms, rowid")
+            .map_err(|e| format!("prepare outbox: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("read outbox: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let json = row.map_err(|e| format!("read outbox row: {e}"))?;
+            out.push(
+                serde_json::from_str(&json).map_err(|e| format!("corrupt outbox op: {e}"))?,
+            );
+        }
+        Ok(out)
+    }
+
+    pub fn remove_op(&mut self, op_id: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM outbox WHERE op_id = ?1", params![op_id])
+            .map_err(|e| format!("remove op: {e}"))?;
+        Ok(())
+    }
+
+    /// Drop every queued op for a record (conflict resolution supersedes
+    /// them). Returns how many were dropped.
+    pub fn remove_ops_for_record(&mut self, record_id: &str) -> Result<usize, String> {
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM outbox WHERE record_id = ?1",
+                params![record_id],
+            )
+            .map_err(|e| format!("remove record ops: {e}"))?;
+        Ok(n)
+    }
+
+    pub fn pending_record_ids(&self) -> Result<std::collections::HashSet<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT record_id FROM outbox")
+            .map_err(|e| format!("prepare pending: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("read pending: {e}"))?;
+        let mut out = std::collections::HashSet::new();
+        for row in rows {
+            out.insert(row.map_err(|e| format!("read pending row: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_sync_state(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM sync_meta WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    pub fn set_sync_state(&mut self, key: &str, value: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO sync_meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map_err(|e| format!("set sync state: {e}"))?;
         Ok(())
     }
 

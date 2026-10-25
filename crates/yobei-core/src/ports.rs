@@ -39,4 +39,7 @@ pub trait SyncTransportPort {
     fn push_ops(&self, vault_id: &str, ops_json: &str) -> Result<String, String>;
     /// Fetch the manifest JSON for a vault.
     fn fetch_manifest(&self, vault_id: &str) -> Result<String, String>;
+    /// Download one record's ciphertext blob (nonce ‖ ciphertext,
+    /// exactly as stored), for pull and conflict resolution.
+    fn fetch_record(&self, vault_id: &str, record_id: &str) -> Result<Vec<u8>, String>;
 }
