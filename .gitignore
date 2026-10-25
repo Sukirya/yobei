@@ -12,7 +12,6 @@ vite.config.ts.timestamp-*
 target/
 
 # Generated mobile projects (recreated by `bun run tauri android init`)
-src-tauri/gen/
 
 # Wrangler local state
 .wrangler/

@@ -1,10 +1,14 @@
 name: Android APK (debug)
 
-# Builds an installable arm64 debug APK in the cloud and stores it as a
-# workflow artifact (Actions run -> Artifacts -> yobei-android-debug-apk).
-# Debug builds are signed with the standard Android debug key, so they
-# install on any device with "install via USB / unknown apps" allowed.
-# Release signing (your own keystore) is a separate, later step.
+# Modeled on the reference project's proven CI layout (committed
+# src-tauri/gen project, setup-android, sdkmanager package pins),
+# adapted to a debug arm64 build. The generated project is committed
+# and pinned to API 36: the current Tauri template emits 37, but no
+# 'platforms;android-37' package exists in any sdkmanager channel yet
+# (stable tops out at 36), and the app uses no API-37-only features.
+#
+# Artifact: Actions run -> Artifacts -> yobei-android-debug-apk
+# (debug-signed, installs on any arm64 Android device).
 
 on:
   workflow_dispatch:
@@ -20,67 +24,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
 
-      # The ubuntu image ships an Android SDK already ($ANDROID_HOME);
-      # android-actions/setup-android proved fragile on current images
-      # (it dies installing the legacy 'tools' package), so drive
-      # sdkmanager directly instead.
-      - name: Install SDK platform 37 and NDK
-        run: |
-          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          SDKMANAGER="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
-          echo "Using $SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses > /dev/null || true
-          # The current Tauri template targets API 37, but no
-          # 'platforms;android-37' package exists in any sdkmanager
-          # channel yet (stable tops out at 36). We install API 36
-          # and pin the generated project down to it below; the app
-          # uses no API-37-only features.
-          "$SDKMANAGER" "platforms;android-36" "build-tools;36.1.0" "ndk;27.2.12479018"
-
-      - name: Set up Rust (stable + Android target)
+      - name: Setup Rust with Android targets
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      - name: Cache Cargo builds
-        uses: actions/cache@v4
+      - name: Setup JDK 21
+        uses: actions/setup-java@v5
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: cargo-android-${{ hashFiles('src-tauri/Cargo.lock', 'crates/yobei-core/Cargo.toml') }}
-          restore-keys: cargo-android-
+          distribution: temurin
+          java-version: "21"
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
 
-      - name: Install frontend dependencies
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+
+      - name: Install dependencies
         run: bun install
 
-      - name: Generate Android project
-        run: bun run tauri android init
-        env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
-
-      - name: Pin generated project to API 36
+      - name: Build Android debug APK (arm64)
         run: |
-          grep -rlE "(compileSdk|targetSdk) = 37" src-tauri/gen/android --include=build.gradle.kts \
-            | xargs sed -i 's/compileSdk = 37/compileSdk = 36/; s/targetSdk = 37/targetSdk = 36/'
-          grep -rnE "(compileSdk|targetSdk)" src-tauri/gen/android/app/build.gradle.kts
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          bun run tauri android build --debug --target aarch64 --ci
 
-      - name: Build debug APK (arm64)
-        run: bun run tauri android build --debug --target aarch64
-        env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
-
-      - name: Upload APK artifact
+      - name: Upload Android debug APK
         uses: actions/upload-artifact@v4
         with:
           name: yobei-android-debug-apk
