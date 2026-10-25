@@ -20,4 +20,5 @@ pub mod record;
 pub mod secretkey;
 pub mod service;
 pub mod sync;
+pub mod totp;
 pub mod vault;

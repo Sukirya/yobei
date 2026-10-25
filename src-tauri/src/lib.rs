@@ -249,6 +249,50 @@ fn purge_record(state: State<'_, AppState>, id: String) -> Result<(), String> {
     with_service(&state, |service| service.purge(&id))
 }
 
+#[derive(Serialize)]
+struct TotpNow {
+    code: String,
+    remaining_secs: u32,
+    period_secs: u32,
+}
+
+/// Live TOTP code for a config (saved or still being edited — the UI
+/// passes the editor's current config, so codes preview before saving).
+#[tauri::command]
+fn totp_preview(config: yobei_core::record::TotpConfig) -> Result<TotpNow, String> {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok(TotpNow {
+        code: yobei_core::totp::totp_code(&config, now_secs)?,
+        remaining_secs: yobei_core::totp::remaining_secs(&config, now_secs),
+        period_secs: config.period_secs,
+    })
+}
+
+#[tauri::command]
+fn generate_totp_secret() -> String {
+    yobei_core::totp::generate_secret()
+}
+
+#[derive(Serialize)]
+struct ParsedOtpauthDto {
+    config: yobei_core::record::TotpConfig,
+    account_name: Option<String>,
+    label_issuer: Option<String>,
+}
+
+#[tauri::command]
+fn parse_otpauth(uri: String) -> Result<ParsedOtpauthDto, String> {
+    let parsed = yobei_core::totp::parse_otpauth_uri(&uri)?;
+    Ok(ParsedOtpauthDto {
+        config: parsed.config,
+        account_name: parsed.account_name,
+        label_issuer: parsed.label_issuer,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -267,7 +311,10 @@ pub fn run() {
             set_favorite,
             delete_record,
             restore_record,
-            purge_record
+            purge_record,
+            totp_preview,
+            generate_totp_secret,
+            parse_otpauth
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

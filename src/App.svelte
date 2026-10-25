@@ -215,6 +215,66 @@
     showPassword = false;
   }
 
+  // --- TOTP live preview (recomputed every second from the editor's
+  // current config, so it works before saving too) ---
+  interface TotpNow {
+    code: string;
+    remaining_secs: number;
+    period_secs: number;
+  }
+  let liveCode = $state("");
+  let liveRemaining = $state(0);
+  let otpauthInput = $state("");
+
+  $effect(() => {
+    const cfg = selected?.account?.totp;
+    if (!cfg || !cfg.secret) {
+      liveCode = "";
+      return;
+    }
+    let alive = true;
+    const tick = async () => {
+      const r = await invoke<TotpNow>("totp_preview", { config: cfg }).catch(
+        () => null,
+      );
+      if (alive && r) {
+        liveCode = r.code;
+        liveRemaining = r.remaining_secs;
+      }
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  });
+
+  async function genTotpSecret() {
+    if (!selected?.account?.totp) return;
+    selected.account.totp.secret = await invoke<string>(
+      "generate_totp_secret",
+    );
+  }
+
+  async function importOtpauth() {
+    if (!selected?.account || !otpauthInput.trim()) return;
+    const parsed = await run(() =>
+      invoke<{
+        config: TotpConfig;
+        account_name: string | null;
+        label_issuer: string | null;
+      }>("parse_otpauth", { uri: otpauthInput }),
+    );
+    if (parsed && selected?.account) {
+      selected.account.totp = parsed.config;
+      if (!selected.account.username && parsed.account_name) {
+        selected.account.username = parsed.account_name;
+      }
+      otpauthInput = "";
+    }
+  }
+
   // editor helpers (operate on `selected`)
   function firstUrl(): string {
     return selected?.account?.urls[0]?.url ?? "";
@@ -386,6 +446,13 @@
                 TOTP 密钥
                 <input type="text" bind:value={selected.account.totp.secret} />
               </label>
+              <div class="row">
+                <button onclick={genTotpSecret}>生成密钥</button>
+                {#if liveCode}
+                  <span class="totp-code">{liveCode}</span>
+                  <span>（{liveRemaining} 秒后刷新）</span>
+                {/if}
+              </div>
               <label>
                 TOTP 发行方
                 <input
@@ -393,6 +460,16 @@
                   bind:value={selected.account.totp.issuer}
                 />
               </label>
+              <div class="row">
+                <input
+                  type="text"
+                  placeholder="粘贴 otpauth:// 链接导入"
+                  bind:value={otpauthInput}
+                />
+                <button disabled={!otpauthInput.trim()} onclick={importOtpauth}>
+                  导入
+                </button>
+              </div>
             {:else}
               <button onclick={enableTotp}>添加 TOTP</button>
             {/if}
@@ -477,6 +554,12 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+  .totp-code {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    font-variant-numeric: tabular-nums;
   }
   input,
   select,
