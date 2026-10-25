@@ -24,5 +24,9 @@ uuid = { version = "1", features = ["v7"] }
 # Import/export formats.
 csv = "1"
 roxmltree = "0.20"
+# WebAuthn (passkeys): ES256 keypairs + CBOR for COSE/attestation.
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+ciborium = "0.2"
 
 [dev-dependencies]

@@ -26,3 +26,4 @@ pub mod syncengine;
 pub mod totp;
 pub mod transfer;
 pub mod vault;
+pub mod webauthn;

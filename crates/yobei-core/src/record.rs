@@ -84,17 +84,37 @@ impl Default for TotpConfig {
     }
 }
 
-/// Reference to (and, inside the encryption boundary, material for) a
-/// passkey. Platform credential-provider details live in adapters.
+/// A real WebAuthn passkey credential, structured per the spec (this
+/// replaces the reference project's placeholder string list — DESIGN.md
+/// §6). Everything a software authenticator needs lives here; the whole
+/// struct sits inside the record's encryption boundary, so the private
+/// key is never stored or synced in plaintext. Platform adapters
+/// (Android Credential Manager, Windows Hello) transport requests; the
+/// cryptography lives in `webauthn.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PasskeyRef {
+pub struct PasskeyCredential {
+    /// Raw credential ID bytes (also the record's lookup key at the RP).
+    pub credential_id: Vec<u8>,
     pub rp_id: String,
-    pub credential_id: String,
-    /// Serialized credential material as produced/consumed by the
-    /// platform WebAuthn adapter; the core treats it as opaque bytes.
-    pub material: Vec<u8>,
+    pub rp_name: Option<String>,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
+    /// The RP's opaque user id this credential was created for.
+    pub user_handle: Vec<u8>,
+    /// PKCS#8 DER private key (ES256). Encrypted at rest by the record
+    /// encryption; never leaves the core.
+    pub private_key_pkcs8: Vec<u8>,
+    /// COSE_Key public key (CBOR), as embedded in attestation/authData.
+    pub public_key_cose: Vec<u8>,
     pub sign_count: u32,
+    /// Authenticator AAGUID (16 bytes).
+    pub aaguid: Vec<u8>,
     pub discoverable: bool,
+    pub backup_eligible: bool,
+    pub backed_up: bool,
+    /// Authenticator transports, e.g. ["internal"], ["internal","hybrid"].
+    pub transports: Vec<String>,
+    pub created_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,7 +134,7 @@ pub struct AccountData {
     pub password_history: Vec<String>,
     pub urls: Vec<RecordUrl>,
     pub totp: Option<TotpConfig>,
-    pub passkeys: Vec<PasskeyRef>,
+    pub passkeys: Vec<PasskeyCredential>,
     pub recovery_codes: Vec<RecoveryCode>,
 }
 
@@ -186,12 +206,22 @@ mod tests {
             issuer: Some("GitHub".to_string()),
             ..TotpConfig::default()
         });
-        acct.passkeys.push(PasskeyRef {
+        acct.passkeys.push(PasskeyCredential {
+            credential_id: vec![1, 2, 3],
             rp_id: "github.com".to_string(),
-            credential_id: "cred-1".to_string(),
-            material: vec![1, 2, 3],
+            rp_name: Some("GitHub".to_string()),
+            user_name: Some("octocat".to_string()),
+            user_display_name: None,
+            user_handle: vec![42],
+            private_key_pkcs8: vec![9, 9, 9],
+            public_key_cose: vec![8, 8, 8],
             sign_count: 0,
+            aaguid: vec![0; 16],
             discoverable: true,
+            backup_eligible: true,
+            backed_up: false,
+            transports: vec!["internal".to_string()],
+            created_at_ms: 1_000,
         });
         acct.recovery_codes.push(RecoveryCode {
             code: "abcd-1234".to_string(),

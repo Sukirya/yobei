@@ -471,6 +471,41 @@ fn sync_configure(
     })
 }
 
+/// Create a passkey for an account record and store it inside the
+/// record (encrypted like everything else). Until the Android
+/// Credential Manager bridge lands, this exercises the real WebAuthn
+/// credential creation in yobei-core for storage verification; the
+/// attestation object is discarded because there is no RP here.
+#[tauri::command]
+fn passkey_create(
+    state: State<'_, AppState>,
+    record_id: String,
+    rp_id: String,
+    user_name: String,
+) -> Result<Record, String> {
+    with_service(&state, |service| {
+        let mut record = service
+            .get_record(&record_id)?
+            .ok_or_else(|| "record not found".to_string())?;
+        let account = record
+            .account
+            .as_mut()
+            .ok_or_else(|| "passkeys can only be added to account records".to_string())?;
+        let (credential, _attestation) = yobei_core::webauthn::create_credential(
+            &rp_id,
+            None,
+            Some(user_name.clone()),
+            None,
+            user_name.into_bytes(),
+            true,
+            now_ms(),
+        )?;
+        account.passkeys.push(credential);
+        service.save_record(&mut record, now_ms())?;
+        Ok(record)
+    })
+}
+
 #[tauri::command]
 fn sync_now(
     state: State<'_, AppState>,
@@ -527,7 +562,8 @@ pub fn run() {
             export_encrypted,
             sync_status,
             sync_configure,
-            sync_now
+            sync_now,
+            passkey_create
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

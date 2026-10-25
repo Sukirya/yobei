@@ -157,7 +157,7 @@ yobei/
 
 ## 7. 待决（不阻塞脚手架与核心）
 
-- passkey 在 Android 的落地路径细节（Credential Manager, Android 14+）需专项验证后再定版
+- passkey 在 Android 的落地路径：核心 WebAuthn 已实现（`webauthn.rs`：ES256 凭证创建/断言签名/验签，结构化 `PasskeyCredential` 落库）；Android 侧已集成 Credential Manager Provider（`YobeiCredentialProviderService` 已注册，begin 请求可响应，androidx.credentials 1.5.0）。剩余：Rust↔Kotlin 桥接（活动页解锁→选凭证→调核心签名→回填结果 Intent）与真机（Android 14+）端到端验证，定版前需完成。
 - Secret Key 默认开还是默认关（UX 与安全的取舍）——v0.1 先做可选、引导开启
 - 同步鉴权是否在 v1 就上请求签名（先用设备令牌，签名留 ADR）
 - 保险库本地存储形态：加密 SQLite vs 追加日志文件（核心 port 已隔离此选择，下个里程碑前定）

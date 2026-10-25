@@ -25,7 +25,7 @@
     password_history: string[];
     urls: { url: string; match_rule: string }[];
     totp: TotpConfig | null;
-    passkeys: unknown[];
+    passkeys: { rp_id: string; sign_count: number }[];
     recovery_codes: { code: string; used: boolean }[];
   }
   interface Field {
@@ -308,6 +308,23 @@
       }),
     );
     if (pw && selected?.account) selected.account.password = pw;
+  }
+
+  let passkeyRp = $state("");
+  async function createPasskey() {
+    if (!selected?.account) return;
+    const rec = await run(() =>
+      invoke<VaultRecord>("passkey_create", {
+        recordId: selected!.id,
+        rpId: passkeyRp,
+        userName: selected!.account!.username || "user",
+      }),
+    );
+    if (rec) {
+      selected = rec;
+      passkeyRp = "";
+      await refreshRecords();
+    }
   }
 
   async function genTotpSecret() {
@@ -648,6 +665,20 @@
             {:else}
               <button onclick={enableTotp}>添加 TOTP</button>
             {/if}
+            <h3>通行密钥</h3>
+            {#each selected.account.passkeys as pk}
+              <p>🔑 {pk.rp_id}（签名计数 {pk.sign_count}）</p>
+            {/each}
+            <div class="row">
+              <input
+                type="text"
+                placeholder="网站域名（如 github.com）"
+                bind:value={passkeyRp}
+              />
+              <button disabled={!passkeyRp.trim()} onclick={createPasskey}>
+                新建通行密钥
+              </button>
+            </div>
           {/if}
           <label>
             标签（逗号分隔）
