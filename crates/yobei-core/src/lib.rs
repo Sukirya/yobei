@@ -17,5 +17,7 @@ pub mod crypto;
 pub mod keys;
 pub mod ports;
 pub mod record;
+pub mod secretkey;
+pub mod service;
 pub mod sync;
 pub mod vault;

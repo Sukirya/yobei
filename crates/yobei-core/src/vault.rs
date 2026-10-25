@@ -163,6 +163,30 @@ impl Vault {
         })
     }
 
+    /// Read just the header of a vault file without unlocking it, so the
+    /// app shell can tell whether a secret key is required before asking
+    /// for credentials. Returns None if the file is not a yobei vault.
+    pub fn peek_header(path: &Path) -> Option<VaultHeader> {
+        let conn = Connection::open(path).ok()?;
+        let header_json: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![HEADER_META_KEY],
+                |row| row.get(0),
+            )
+            .ok()?;
+        serde_json::from_str(&header_json).ok()
+    }
+
+    /// Permanently remove a record row (no tombstone). Used for trash
+    /// purge and for wiping conflict copies the user resolved manually.
+    pub fn purge(&mut self, id: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM records WHERE id = ?1", params![id])
+            .map_err(|e| format!("purge record: {e}"))?;
+        Ok(())
+    }
+
     fn store_header(conn: &mut Connection, header: &VaultHeader) -> Result<(), String> {
         let json = serde_json::to_string(header).map_err(|e| format!("serialize header: {e}"))?;
         conn.execute(
