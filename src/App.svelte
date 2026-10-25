@@ -250,6 +250,63 @@
     };
   });
 
+  // --- password generator + strength (editor) ---
+  interface StrengthReport {
+    entropy_bits: number;
+    score: number;
+    warnings: string[];
+    offline_crack_estimate: string;
+  }
+  const SCORE_LABELS = ["很弱", "弱", "一般", "强", "极强"];
+  let genLength = $state(20);
+  let genSymbols = $state(true);
+  let strength = $state<StrengthReport | null>(null);
+
+  $effect(() => {
+    const pw = selected?.account?.password ?? "";
+    if (!pw) {
+      strength = null;
+      return;
+    }
+    let alive = true;
+    invoke<StrengthReport>("password_strength", { password: pw })
+      .then((r) => {
+        if (alive) strength = r;
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  });
+
+  async function genPassword() {
+    if (!selected?.account) return;
+    const pw = await run(() =>
+      invoke<string>("generate_password", {
+        options: {
+          length: genLength,
+          lowercase: true,
+          uppercase: true,
+          digits: true,
+          symbols: genSymbols,
+          exclude_ambiguous: false,
+        },
+      }),
+    );
+    if (pw && selected?.account) selected.account.password = pw;
+  }
+
+  async function genPassphrase() {
+    if (!selected?.account) return;
+    const pw = await run(() =>
+      invoke<string>("generate_passphrase", {
+        wordCount: 5,
+        separator: "-",
+      }),
+    );
+    if (pw && selected?.account) selected.account.password = pw;
+  }
+
   async function genTotpSecret() {
     if (!selected?.account?.totp) return;
     selected.account.totp.secret = await invoke<string>(
@@ -433,6 +490,25 @@
                 {showPassword ? "隐藏" : "显示"}
               </button>
             </label>
+            <div class="row">
+              <span>长度</span>
+              <input type="number" min="6" max="128" bind:value={genLength} />
+              <label>
+                <input type="checkbox" bind:checked={genSymbols} /> 符号
+              </label>
+              <button onclick={genPassword}>生成密码</button>
+              <button onclick={genPassphrase}>生成短语</button>
+            </div>
+            {#if strength}
+              <p class="strength">
+                强度：{SCORE_LABELS[strength.score]}（{strength.entropy_bits.toFixed(
+                  0,
+                )} bits · 离线破解约 {strength.offline_crack_estimate}）
+                {#if strength.warnings.length}
+                  <br />⚠ {strength.warnings.join("；")}
+                {/if}
+              </p>
+            {/if}
             <label>
               网址
               <input

@@ -293,6 +293,25 @@ fn parse_otpauth(uri: String) -> Result<ParsedOtpauthDto, String> {
     })
 }
 
+#[tauri::command]
+fn generate_password(
+    options: yobei_core::passwords::GeneratorOptions,
+) -> Result<String, String> {
+    yobei_core::passwords::generate_password(&options)
+}
+
+#[tauri::command]
+fn generate_passphrase(word_count: usize, separator: String) -> Result<String, String> {
+    yobei_core::passwords::generate_passphrase(word_count, &separator)
+}
+
+#[tauri::command]
+fn password_strength(
+    password: String,
+) -> yobei_core::passwords::StrengthReport {
+    yobei_core::passwords::password_strength(&password)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -314,7 +333,10 @@ pub fn run() {
             purge_record,
             totp_preview,
             generate_totp_secret,
-            parse_otpauth
+            parse_otpauth,
+            generate_password,
+            generate_passphrase,
+            password_strength
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
