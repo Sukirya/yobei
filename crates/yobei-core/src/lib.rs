@@ -14,6 +14,8 @@
 //!   sync server (idempotent ops, version checks, conflict copies).
 
 pub mod crypto;
+pub mod keys;
 pub mod ports;
 pub mod record;
 pub mod sync;
+pub mod vault;

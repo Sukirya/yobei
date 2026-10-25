@@ -5,7 +5,9 @@
 
 /// Encrypted vault persistence (an adapter may be a file, an encrypted
 /// SQLite store, or an in-memory fake in tests). The core hands the
-/// adapter ciphertext only.
+/// adapter ciphertext only. The v0.1 reference implementation is the
+/// SQLite store in `vault.rs` (row-level ciphertext, see DESIGN.md
+/// ADR-001); this whole-blob port remains for alternate adapters.
 pub trait VaultStoragePort {
     fn load(&self, vault_id: &str) -> Result<Option<Vec<u8>>, String>;
     fn save(&self, vault_id: &str, ciphertext: &[u8]) -> Result<(), String>;

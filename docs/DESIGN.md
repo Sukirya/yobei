@@ -161,3 +161,7 @@ yobei/
 - Secret Key 默认开还是默认关（UX 与安全的取舍）——v0.1 先做可选、引导开启
 - 同步鉴权是否在 v1 就上请求签名（先用设备令牌，签名留 ADR）
 - 保险库本地存储形态：加密 SQLite vs 追加日志文件（核心 port 已隔离此选择，下个里程碑前定）
+
+## 8. ADR 记录
+
+- **ADR-001（2026-10-25）保险库本地存储 = SQLite + 逐条密文**：保险库是一个 SQLite 文件（rusqlite bundled，Android/桌面同一实现）。`meta` 表存保险库头（格式版本、CryptoProfile 含 KDF 参数、KDF 盐、被 KEK 包裹的保险库密钥）；`records` 表只有 id/kind/时间戳/版本/墓碑标记等列表与同步必需列是明文，记录内容一律是 AEAD 密文 blob（与同步服务端 D1 的行结构同构）。不采用 SQLCipher 整库加密：避免原生依赖与 Android CI 交叉编译风险，且整库加密与逐条加密叠加收益有限。列表靠内存解密（个人库规模足够）。实现见 `crates/yobei-core/src/vault.rs`、`keys.rs`；改主密码只重包保险库密钥，不触碰记录。
