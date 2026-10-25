@@ -36,10 +36,12 @@ jobs:
           SDKMANAGER="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
           echo "Using $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
-          # API 37 (what the current Tauri template targets) is not in
-          # the stable channel yet; it ships via canary for now.
-          "$SDKMANAGER" --channel=3 "platforms;android-37"
-          "$SDKMANAGER" "build-tools;37.0.0" "ndk;27.2.12479018"
+          # The current Tauri template targets API 37, but no
+          # 'platforms;android-37' package exists in any sdkmanager
+          # channel yet (stable tops out at 36). We install API 36
+          # and pin the generated project down to it below; the app
+          # uses no API-37-only features.
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.1.0" "ndk;27.2.12479018"
 
       - name: Set up Rust (stable + Android target)
         uses: dtolnay/rust-toolchain@stable
@@ -66,6 +68,12 @@ jobs:
         run: bun run tauri android init
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+
+      - name: Pin generated project to API 36
+        run: |
+          grep -rlE "(compileSdk|targetSdk) = 37" src-tauri/gen/android --include=build.gradle.kts \
+            | xargs sed -i 's/compileSdk = 37/compileSdk = 36/; s/targetSdk = 37/targetSdk = 36/'
+          grep -rnE "(compileSdk|targetSdk)" src-tauri/gen/android/app/build.gradle.kts
 
       - name: Build debug APK (arm64)
         run: bun run tauri android build --debug --target aarch64
