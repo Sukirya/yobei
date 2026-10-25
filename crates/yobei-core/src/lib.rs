@@ -14,6 +14,7 @@
 //!   sync server (idempotent ops, version checks, conflict copies).
 
 pub mod crypto;
+pub mod keepass;
 pub mod keys;
 pub mod passwords;
 pub mod ports;
@@ -22,4 +23,5 @@ pub mod secretkey;
 pub mod service;
 pub mod sync;
 pub mod totp;
+pub mod transfer;
 pub mod vault;

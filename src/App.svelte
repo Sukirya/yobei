@@ -360,6 +360,59 @@
   function removeField(i: number) {
     selected?.fields.splice(i, 1);
   }
+  // --- import / export ---
+  interface PreviewItem {
+    title: string;
+    kind: string;
+    has_username: boolean;
+    has_password: boolean;
+    has_totp: boolean;
+    url_count: number;
+    field_count: number;
+  }
+  let impFormat = $state("csv");
+  let impText = $state("");
+  let impPassword = $state("");
+  let impPreview = $state<PreviewItem[] | null>(null);
+  let expPassword = $state("");
+  let expText = $state("");
+
+  async function doPreview() {
+    const items = await run(() =>
+      invoke<PreviewItem[]>("import_preview", {
+        format: impFormat,
+        text: impText,
+        exportPassword: impPassword || null,
+      }),
+    );
+    if (items) impPreview = items;
+  }
+
+  async function doImport() {
+    const n = await run(() =>
+      invoke<number>("import_execute", {
+        format: impFormat,
+        text: impText,
+        exportPassword: impPassword || null,
+      }),
+    );
+    if (n !== undefined) {
+      impPreview = null;
+      impText = "";
+      await refreshRecords();
+      alert(`已导入 ${n} 条记录`);
+    }
+  }
+
+  async function doExport(kind: "csv" | "json" | "encrypted") {
+    const text = await run(() => {
+      if (kind === "csv") return invoke<string>("export_csv");
+      if (kind === "json") return invoke<string>("export_json");
+      return invoke<string>("export_encrypted", { password: expPassword });
+    });
+    if (text) expText = text;
+  }
+
   function tagsText(): string {
     return selected?.tags.join(", ") ?? "";
   }
@@ -576,6 +629,70 @@
           </div>
         </section>
       {/if}
+
+      <section class="editor">
+        <h2>导入</h2>
+        <div class="row">
+          <select bind:value={impFormat}>
+            <option value="csv">CSV（Bitwarden / Chrome / 通用）</option>
+            <option value="bitwarden_json">Bitwarden JSON</option>
+            <option value="keepass_xml">KeePass XML</option>
+            <option value="yobei_json">yobei JSON</option>
+            <option value="yobei_encrypted">yobei 加密导出</option>
+          </select>
+          {#if impFormat === "yobei_encrypted"}
+            <input
+              type="password"
+              placeholder="导出密码"
+              bind:value={impPassword}
+            />
+          {/if}
+        </div>
+        <textarea
+          rows="5"
+          placeholder="把文件内容粘贴到这里（占位界面暂用粘贴代替文件选择）"
+          bind:value={impText}
+        ></textarea>
+        <div class="row">
+          <button disabled={!impText.trim()} onclick={doPreview}>预览</button>
+          <button disabled={!impText.trim()} onclick={doImport}>直接导入</button>
+        </div>
+        {#if impPreview}
+          <ul class="list">
+            {#each impPreview as p}
+              <li>
+                {p.title}
+                <small>
+                  （{p.kind} · {p.has_username ? "有用户名 " : ""}{p.has_password
+                    ? "有密码 "
+                    : ""}{p.has_totp ? "有TOTP " : ""}网址×{p.url_count} 字段×{p.field_count}）
+                </small>
+              </li>
+            {/each}
+          </ul>
+          <button onclick={doImport}>确认导入 {impPreview.length} 条</button>
+        {/if}
+
+        <h2>导出</h2>
+        <div class="row">
+          <button onclick={() => doExport("csv")}>导出 CSV</button>
+          <button onclick={() => doExport("json")}>导出 JSON</button>
+          <input
+            type="password"
+            placeholder="加密导出密码"
+            bind:value={expPassword}
+          />
+          <button disabled={!expPassword} onclick={() => doExport("encrypted")}>
+            加密导出（推荐）
+          </button>
+        </div>
+        <p class="warn">
+          注意：CSV / JSON 导出是明文，只能用于迁移，存好后请删除。
+        </p>
+        {#if expText}
+          <textarea rows="8" readonly value={expText}></textarea>
+        {/if}
+      </section>
     </section>
   {/if}
 </main>
@@ -636,6 +753,14 @@
     font-weight: 700;
     letter-spacing: 3px;
     font-variant-numeric: tabular-nums;
+  }
+  .warn {
+    color: #b26a00;
+    font-size: 13px;
+  }
+  textarea {
+    width: 100%;
+    box-sizing: border-box;
   }
   input,
   select,

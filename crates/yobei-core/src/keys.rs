@@ -113,6 +113,19 @@ pub fn unwrap_key(kek: &[u8; KEY_LEN], blob: &[u8]) -> Result<Zeroizing<[u8; KEY
     Ok(Zeroizing::new(arr))
 }
 
+const BLOB_AAD: &[u8] = b"yobei-blob-v1";
+
+/// Encrypt an arbitrary blob under a 32-byte key (used for encrypted
+/// export files). Output is `nonce ‖ ciphertext`.
+pub fn encrypt_blob(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    aead_encrypt(key, plaintext, BLOB_AAD)
+}
+
+/// Decrypt a blob produced by [`encrypt_blob`].
+pub fn decrypt_blob(key: &[u8; KEY_LEN], blob: &[u8]) -> Result<Vec<u8>, String> {
+    aead_decrypt(key, blob, BLOB_AAD)
+}
+
 /// Per-record key: HKDF from the vault key, bound to the record id, so a
 /// ciphertext copied onto another record's row cannot be decrypted there.
 pub fn record_key(vault_key: &[u8; KEY_LEN], record_id: &str) -> [u8; KEY_LEN] {

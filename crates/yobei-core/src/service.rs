@@ -131,6 +131,34 @@ impl Service {
     pub fn purge(&mut self, id: &str) -> Result<(), String> {
         self.vault.purge(id)
     }
+
+    /// Commit records produced by an importer: assigns real ids, this
+    /// vault's id, and fresh timestamps/version. Returns how many were
+    /// imported.
+    pub fn import_records(
+        &mut self,
+        records: Vec<Record>,
+        now_ms: i64,
+    ) -> Result<usize, String> {
+        let mut count = 0;
+        for mut record in records {
+            record.id = Vault::new_id();
+            record.vault_id = self.vault_id().to_string();
+            record.created_at_ms = now_ms;
+            record.updated_at_ms = now_ms;
+            record.version = 1;
+            record.hlc = now_ms.max(0) as u64;
+            record.deleted = false;
+            self.vault.put(&record)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// All live records (used by exports).
+    pub fn all_records(&self) -> Result<Vec<Record>, String> {
+        self.vault.list(false)
+    }
 }
 
 fn record_matches(record: &Record, q: &str) -> bool {

@@ -21,5 +21,8 @@ data-encoding = "2"
 # Local storage: SQLite with per-record ciphertext blobs (DESIGN.md §7 ADR).
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v7"] }
+# Import/export formats.
+csv = "1"
+roxmltree = "0.20"
 
 [dev-dependencies]

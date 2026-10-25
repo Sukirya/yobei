@@ -312,6 +312,55 @@ fn password_strength(
     yobei_core::passwords::password_strength(&password)
 }
 
+#[tauri::command]
+fn import_preview(
+    format: String,
+    text: String,
+    export_password: Option<String>,
+) -> Result<Vec<yobei_core::transfer::ImportPreviewItem>, String> {
+    let records =
+        yobei_core::transfer::parse_import(&format, &text, export_password.as_deref())?;
+    Ok(yobei_core::transfer::preview(&records))
+}
+
+#[tauri::command]
+fn import_execute(
+    state: State<'_, AppState>,
+    format: String,
+    text: String,
+    export_password: Option<String>,
+) -> Result<usize, String> {
+    let records =
+        yobei_core::transfer::parse_import(&format, &text, export_password.as_deref())?;
+    with_service(&state, |service| {
+        service.import_records(records, now_ms())
+    })
+}
+
+#[tauri::command]
+fn export_csv(state: State<'_, AppState>) -> Result<String, String> {
+    with_service(&state, |service| {
+        yobei_core::transfer::export_csv(&service.all_records()?)
+    })
+}
+
+#[tauri::command]
+fn export_json(state: State<'_, AppState>) -> Result<String, String> {
+    with_service(&state, |service| {
+        yobei_core::transfer::export_json(&service.all_records()?)
+    })
+}
+
+#[tauri::command]
+fn export_encrypted(
+    state: State<'_, AppState>,
+    password: String,
+) -> Result<String, String> {
+    with_service(&state, |service| {
+        yobei_core::transfer::export_encrypted(&service.all_records()?, &password)
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -336,7 +385,12 @@ pub fn run() {
             parse_otpauth,
             generate_password,
             generate_passphrase,
-            password_strength
+            password_strength,
+            import_preview,
+            import_execute,
+            export_csv,
+            export_json,
+            export_encrypted
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
