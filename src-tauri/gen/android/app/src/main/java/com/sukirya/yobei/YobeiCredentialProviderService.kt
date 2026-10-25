@@ -16,7 +16,6 @@ import androidx.credentials.provider.CreateEntry
 import androidx.credentials.provider.CredentialProviderService
 import androidx.credentials.provider.ProviderClearCredentialStateRequest
 import androidx.credentials.provider.PublicKeyCredentialEntry
-import java.util.concurrent.Executor
 
 /**
  * Android Credential Manager provider (Android 14+): lets other apps and
@@ -34,7 +33,6 @@ class YobeiCredentialProviderService : CredentialProviderService() {
     override fun onBeginGetCredentialRequest(
         request: BeginGetCredentialRequest,
         cancellationSignal: CancellationSignal,
-        executor: Executor,
         callback: OutcomeReceiver<BeginGetCredentialResponse, GetCredentialException>
     ) {
         val publicKeyOption = request.beginGetCredentialOptions
@@ -65,7 +63,6 @@ class YobeiCredentialProviderService : CredentialProviderService() {
     override fun onBeginCreateCredentialRequest(
         request: BeginCreateCredentialRequest,
         cancellationSignal: CancellationSignal,
-        executor: Executor,
         callback: OutcomeReceiver<BeginCreateCredentialResponse, CreateCredentialException>
     ) {
         val intent = Intent(this, PasskeyCreateActivity::class.java)
@@ -86,7 +83,6 @@ class YobeiCredentialProviderService : CredentialProviderService() {
     override fun onClearCredentialStateRequest(
         request: ProviderClearCredentialStateRequest,
         cancellationSignal: CancellationSignal,
-        executor: Executor,
         callback: OutcomeReceiver<Void?, ClearCredentialException>
     ) {
         // Nothing cached provider-side; the vault is the only store.

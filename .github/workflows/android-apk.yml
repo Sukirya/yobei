@@ -36,7 +36,9 @@ jobs:
             crates/yobei-core -> target
 
       - name: Run core tests
-        run: cargo test -p yobei-core
+        # No root workspace manifest by design (Tauri layout); point
+        # cargo at the crate directly.
+        run: cargo test --manifest-path crates/yobei-core/Cargo.toml
 
   # Windows is platform priority #2: keep the desktop shell compiling
   # there even before release builds are wired up.
