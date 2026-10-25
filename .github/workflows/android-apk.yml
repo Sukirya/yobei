@@ -36,7 +36,10 @@ jobs:
           SDKMANAGER="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
           echo "Using $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" "platforms;android-37" "build-tools;37.0.0" "ndk;27.2.12479018"
+          # API 37 (what the current Tauri template targets) is not in
+          # the stable channel yet; it ships via canary for now.
+          "$SDKMANAGER" --channel=3 "platforms;android-37"
+          "$SDKMANAGER" "build-tools;37.0.0" "ndk;27.2.12479018"
 
       - name: Set up Rust (stable + Android target)
         uses: dtolnay/rust-toolchain@stable
