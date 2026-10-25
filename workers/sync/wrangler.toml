@@ -1,0 +1,16 @@
+# yobei sync server — deploy this to YOUR OWN Cloudflare account.
+# The developer runs no server for you; the free tier is enough for
+# personal sync, and the worker only ever stores ciphertext.
+# Storage is D1 only: D1's free tier needs no payment card on file,
+# while R2 does — and a personal vault's ciphertext fits D1 easily.
+name = "yobei-sync"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Create the D1 database, put its id below, and load the schema:
+#      bunx wrangler d1 create yobei-sync-db
+#      bunx wrangler d1 execute yobei-sync-db --file=schema.sql
+[[d1_databases]]
+binding = "DB"
+database_name = "yobei-sync-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"

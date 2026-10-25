@@ -1,0 +1,73 @@
+name: Android APK (debug)
+
+# Builds an installable arm64 debug APK in the cloud and stores it as a
+# workflow artifact (Actions run -> Artifacts -> yobei-android-debug-apk).
+# Debug builds are signed with the standard Android debug key, so they
+# install on any device with "install via USB / unknown apps" allowed.
+# Release signing (your own keystore) is a separate, later step.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK platform 37 and NDK
+        run: |
+          sdkmanager "platforms;android-37" "build-tools;37.0.0" "ndk;27.2.12479018"
+
+      - name: Set up Rust (stable + Android target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Cargo builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-android-${{ hashFiles('src-tauri/Cargo.lock', 'crates/yobei-core/Cargo.toml') }}
+          restore-keys: cargo-android-
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install
+
+      - name: Generate Android project
+        run: bun run tauri android init
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+
+      - name: Build debug APK (arm64)
+        run: bun run tauri android build --debug --target aarch64
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yobei-android-debug-apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
