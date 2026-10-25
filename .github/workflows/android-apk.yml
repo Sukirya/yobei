@@ -26,11 +26,13 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # The ubuntu image ships an Android SDK already ($ANDROID_HOME);
+      # android-actions/setup-android proved fragile on current images
+      # (it dies installing the legacy 'tools' package), so drive
+      # sdkmanager directly instead.
       - name: Install SDK platform 37 and NDK
         run: |
+          yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-37" "build-tools;37.0.0" "ndk;27.2.12479018"
 
       - name: Set up Rust (stable + Android target)
