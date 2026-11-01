@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "yobei",
+  "productName": "Yobei",
   "version": "0.1.0",
   "identifier": "com.sukirya.yobei",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "yobei",
+        "title": "Yobei",
         "width": 800,
         "height": 600
       }

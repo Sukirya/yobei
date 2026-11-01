@@ -377,8 +377,6 @@
     return t("crack.universe");
   }
 
-  let genLength = $state(20);
-  let genSymbols = $state(true);
   let strength = $state<StrengthReport | null>(null);
 
   $effect(() => {
@@ -404,11 +402,11 @@
     const pw = await run(() =>
       invoke<string>("generate_password", {
         options: {
-          length: genLength,
+          length: 20,
           lowercase: true,
           uppercase: true,
           digits: true,
-          symbols: genSymbols,
+          symbols: true,
           exclude_ambiguous: false,
         },
       }),
@@ -423,30 +421,6 @@
       invoke<string>("generate_passphrase", { wordCount: 5, separator: "-" }),
     );
     if (pw) acct.password = pw;
-  }
-
-  let passkeyRp = $state("");
-  async function createPasskey() {
-    const acct = accountOf();
-    if (!selected || !acct || !passkeyRp.trim()) return;
-    const entry = await run(() =>
-      invoke<Entry>("passkey_create", {
-        entryId: selected!.id,
-        rpId: passkeyRp,
-        userName: acct.username || "user",
-      }),
-    );
-    if (entry) {
-      selected = entry;
-      passkeyRp = "";
-      await refreshEntries();
-    }
-  }
-
-  async function genTotpSecret() {
-    const acct = accountOf();
-    if (!acct?.totp) return;
-    acct.totp.secret = await invoke<string>("generate_totp_secret");
   }
 
   async function importOtpauth() {
@@ -901,12 +875,6 @@
               />
             </label>
             <div class="row">
-              <span>{t("editor.length")}</span>
-              <input type="number" min="6" max="128" bind:value={genLength} />
-              <label>
-                <input type="checkbox" bind:checked={genSymbols} />
-                {t("editor.symbols")}
-              </label>
               <button onclick={genPassword}>{t("editor.generatePassword")}</button>
               <button onclick={genPassphrase}>{t("editor.generatePhrase")}</button>
             </div>
@@ -935,13 +903,12 @@
                 {t("editor.totpSecret")}
                 <input type="text" bind:value={acct.totp.secret} />
               </label>
-              <div class="row">
-                <button onclick={genTotpSecret}>{t("editor.generateSecret")}</button>
-                {#if liveCode}
+              {#if liveCode}
+                <div class="row">
                   <span class="totp-code">{liveCode}</span>
                   <span>{t("editor.secondsLeft", { seconds: liveRemaining })}</span>
-                {/if}
-              </div>
+                </div>
+              {/if}
               <label>
                 {t("editor.issuer")}
                 <input type="text" bind:value={acct.totp.issuer} />
@@ -965,16 +932,8 @@
                 🔑 {pk.rp_id} · {t("editor.signCount", { count: pk.sign_count })}
               </p>
             {/each}
-            <div class="row">
-              <input
-                type="text"
-                placeholder={t("editor.rpPlaceholder")}
-                bind:value={passkeyRp}
-              />
-              <button disabled={!passkeyRp.trim()} onclick={createPasskey}>
-                {t("editor.createPasskey")}
-              </button>
-            </div>
+            <!-- Passkeys are only created when a site initiates registration
+                 (AGENTS.md, ADR-0004); the editor never creates one. -->
           {:else if selected.payload.type === "card"}
             {@const card = selected.payload as CardPayload}
             <label>
