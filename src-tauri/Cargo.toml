@@ -29,9 +29,11 @@ data-encoding = "2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+# opt-level "s" (not 3): this is a size-sensitive mobile build; the
+# crypto hot path is Argon2, whose cost dominates any codegen difference.
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = 3
+opt-level = "s"
 panic = "abort"
 strip = true

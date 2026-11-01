@@ -30,4 +30,14 @@ p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 ciborium = "0.2"
 
+# Same size-focused release profile as the app shell (which builds this
+# crate as a dependency); also applies to standalone release builds of
+# the core (cargo test --release). See src-tauri/Cargo.toml.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
+
 [dev-dependencies]

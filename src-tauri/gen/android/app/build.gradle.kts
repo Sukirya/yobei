@@ -14,6 +14,23 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// Release signing: create src-tauri/gen/android/keystore.properties
+// (gitignored) with keyAlias, keyPassword, storeFile, storePassword.
+// Without it the release build falls back to the debug keystore, which
+// is fine for measuring size but must never be shipped to users.
+val keystoreProperties = Properties().apply {
+    val propFile = file("../keystore.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+val hasReleaseKeystore = listOf(
+    "keyAlias",
+    "keyPassword",
+    "storeFile",
+    "storePassword",
+).all { keystoreProperties.getProperty(it) != null }
+
 android {
     compileSdk = 36
     namespace = "com.sukirya.yobei"
@@ -24,6 +41,16 @@ android {
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -42,12 +69,18 @@ android {
             optimization {
                enable = true
             }
+            // R8: shrink + obfuscate bytecode, drop unused resources.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
-                *fileTree(".") {
-                  include("**/*.pro")
-                  exclude("build/**")
-                }.files.toTypedArray()
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
             )
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
     compileOptions {
