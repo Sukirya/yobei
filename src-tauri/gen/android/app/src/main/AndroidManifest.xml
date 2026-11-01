@@ -5,10 +5,14 @@
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
+    <!-- allowBackup=false: the encrypted vault must never be silently
+         restored by Auto Backup after uninstall (it would resurrect a
+         deleted vault); recovery is via the recovery kit + sync. -->
     <application
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@style/Theme.yobei"
+        android:allowBackup="false"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"

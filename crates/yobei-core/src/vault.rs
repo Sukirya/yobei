@@ -102,6 +102,26 @@ pub struct ListReport {
     pub skipped: Vec<String>,
 }
 
+/// A zero-byte file at the vault path cannot hold a vault: it is a leftover
+/// from a partial init. Removing it is safe; a non-empty file is never
+/// touched here.
+fn remove_empty_file(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.is_file() && meta.len() == 0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Refuse to overwrite a real vault, but tolerate a zero-byte leftover file.
+fn ensure_no_vault(path: &Path) -> Result<(), String> {
+    remove_empty_file(path);
+    if path.exists() {
+        return Err("vault file already exists".to_string());
+    }
+    Ok(())
+}
+
 /// An unlocked vault. Holds the vault key in memory (zeroized on drop);
 /// dropping the `Vault` is locking it.
 pub struct Vault {
@@ -147,7 +167,7 @@ impl Vault {
         Ok(BASE64.encode(&crate::bootstrap::auth_key_hash(&auth)))
     }
 
-    /// Create a new vault file. Fails if the file already exists.
+    /// Create a new vault file. Fails if a vault already exists at the path.
     pub fn create(
         path: &Path,
         password: &str,
@@ -155,9 +175,7 @@ impl Vault {
         profile: CryptoProfile,
         now_ms: i64,
     ) -> Result<Vault, String> {
-        if path.exists() {
-            return Err("vault file already exists".to_string());
-        }
+        ensure_no_vault(path)?;
         // Every externally supplied parameter set is validated before use
         // (ADR-0001 §4).
         crate::bootstrap::validate_kdf_params(&profile.kdf_params)?;
@@ -167,36 +185,41 @@ impl Vault {
         profile.secret_key_enabled = true;
 
         let mut conn = Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
-        conn.execute_batch(SCHEMA_SQL)
-            .map_err(|e| format!("init vault schema: {e}"))?;
-
-        let salt = keys::random_bytes(KDF_SALT_LEN);
-        let kek = keys::derive_kek(password, &salt, profile.kdf_params, Some(secret_key))?;
-        let vault_key_bytes: [u8; KEY_LEN] = keys::random_bytes(KEY_LEN)
-            .try_into()
-            .expect("random_bytes returns the requested length");
-        let wrapped = keys::wrap_key(&kek, &vault_key_bytes)?;
-        let sync_address = crate::bootstrap::vault_address(secret_key)?;
-        let mut header = VaultHeader {
-            format_version: VAULT_FORMAT_VERSION,
-            vault_id: Self::new_id(),
-            profile,
-            kdf_salt: salt,
-            wrapped_vault_key: wrapped,
-            created_at_ms: now_ms,
-            sync_address: Some(sync_address),
-            bootstrap_package: None,
+        // Any failure below must remove the partial file, or the next
+        // create attempt is blocked by "vault file already exists".
+        let built: Result<(VaultHeader, [u8; KEY_LEN]), String> = (|| {
+            conn.execute_batch(SCHEMA_SQL)
+                .map_err(|e| format!("init vault schema: {e}"))?;
+            let salt = keys::random_bytes(KDF_SALT_LEN);
+            let kek = keys::derive_kek(password, &salt, profile.kdf_params, Some(secret_key))?;
+            let vault_key_bytes: [u8; KEY_LEN] = keys::random_bytes(KEY_LEN)
+                .try_into()
+                .expect("random_bytes returns the requested length");
+            let wrapped = keys::wrap_key(&kek, &vault_key_bytes)?;
+            let sync_address = crate::bootstrap::vault_address(secret_key)?;
+            let mut header = VaultHeader {
+                format_version: VAULT_FORMAT_VERSION,
+                vault_id: Self::new_id(),
+                profile,
+                kdf_salt: salt,
+                wrapped_vault_key: wrapped,
+                created_at_ms: now_ms,
+                sync_address: Some(sync_address),
+                bootstrap_package: None,
+            };
+            let package = Self::seal_package(&header, secret_key)?;
+            header.bootstrap_package = Some(package);
+            Self::store_header(&mut conn, &header)?;
+            Ok((header, vault_key_bytes))
+        })();
+        let (header, vault_key_bytes) = match built {
+            Ok(v) => v,
+            Err(e) => {
+                drop(conn);
+                let _ = std::fs::remove_file(path);
+                return Err(e);
+            }
         };
-        let package = Self::seal_package(&header, secret_key)?;
-        header.bootstrap_package = Some(package);
-        // On any failure after file creation, remove the partial file so a
-        // retry is not blocked by a half-initialized vault.
-        let result = Self::store_header(&mut conn, &header);
-        if let Err(e) = result {
-            drop(conn);
-            let _ = std::fs::remove_file(path);
-            return Err(e);
-        }
         Ok(Vault {
             conn,
             header,
@@ -207,6 +230,11 @@ impl Vault {
     /// Open an existing vault. A wrong password (or wrong/missing secret
     /// key) fails at unwrapping the vault key, before any entry is read.
     pub fn open(path: &Path, password: &str, secret_key: Option<&[u8]>) -> Result<Vault, String> {
+        // Connection::open creates a zero-byte file when the path does not
+        // exist; never open a missing vault, or the next create is blocked.
+        if !path.exists() {
+            return Err("no vault found".to_string());
+        }
         let mut conn = Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
         conn.execute_batch("PRAGMA secure_delete = ON;")
             .map_err(|e| format!("configure vault db: {e}"))?;
@@ -279,9 +307,7 @@ impl Vault {
         bootstrap: &[u8],
         address: &str,
     ) -> Result<Vault, String> {
-        if path.exists() {
-            return Err("vault file already exists".to_string());
-        }
+        ensure_no_vault(path)?;
         let wire = crate::bootstrap::open_bootstrap(secret_key, address, bootstrap)?;
         if wire.format_version != VAULT_FORMAT_VERSION {
             return Err(format!(
@@ -295,8 +321,6 @@ impl Vault {
             .map_err(|_| "wrong password or secret key".to_string())?;
 
         let mut conn = Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
-        conn.execute_batch(SCHEMA_SQL)
-            .map_err(|e| format!("init vault schema: {e}"))?;
         let header = VaultHeader {
             format_version: wire.format_version,
             vault_id: wire.vault_id,
@@ -311,8 +335,13 @@ impl Vault {
             sync_address: Some(address.to_string()),
             bootstrap_package: Some(bootstrap.to_vec()),
         };
-        let result = Self::store_header(&mut conn, &header);
-        if let Err(e) = result {
+        // Any failure below must remove the partial file (see create).
+        let stored: Result<(), String> = (|| {
+            conn.execute_batch(SCHEMA_SQL)
+                .map_err(|e| format!("init vault schema: {e}"))?;
+            Self::store_header(&mut conn, &header)
+        })();
+        if let Err(e) = stored {
             drop(conn);
             let _ = std::fs::remove_file(path);
             return Err(e);
@@ -328,6 +357,12 @@ impl Vault {
     /// app shell can tell whether a secret key is required before asking
     /// for credentials. Returns None if the file is not a yobei vault.
     pub fn peek_header(path: &Path) -> Option<VaultHeader> {
+        // Connection::open creates a zero-byte file when the path does not
+        // exist; never probe a missing file, or the next create is blocked
+        // by "vault file already exists".
+        if !path.exists() {
+            return None;
+        }
         let conn = Connection::open(path).ok()?;
         let header_json: String = conn
             .query_row(
@@ -738,6 +773,68 @@ mod tests {
 
     fn temp_vault_path(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("yobei-test-{}-{}.db", tag, Vault::new_id()))
+    }
+
+    #[test]
+    fn peek_header_does_not_create_a_file() {
+        let path = temp_vault_path("peek-no-create");
+        assert!(!path.exists());
+        assert!(Vault::peek_header(&path).is_none());
+        assert!(
+            !path.exists(),
+            "peek_header must not plant a zero-byte file"
+        );
+    }
+
+    #[test]
+    fn create_succeeds_after_peek_header() {
+        // Regression test: the app calls vault_status (peek_header) on
+        // startup, then the user taps Create. The peek must not block it.
+        let path = temp_vault_path("peek-then-create");
+        let sk = keys::random_bytes(KEY_LEN);
+        assert!(Vault::peek_header(&path).is_none());
+        Vault::create(&path, "pw-1", Some(&sk), test_profile(), 1_000).unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn create_refuses_a_real_existing_vault() {
+        let path = temp_vault_path("create-twice");
+        let sk = keys::random_bytes(KEY_LEN);
+        let vault = Vault::create(&path, "pw-1", Some(&sk), test_profile(), 1_000).unwrap();
+        drop(vault);
+        let err = Vault::create(&path, "pw-2", Some(&sk), test_profile(), 2_000).err();
+        assert_eq!(err.as_deref(), Some("vault file already exists"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn create_and_adopt_tolerate_a_zero_byte_leftover_file() {
+        let path = temp_vault_path("empty-leftover");
+        std::fs::write(&path, []).unwrap();
+        let sk = keys::random_bytes(KEY_LEN);
+        Vault::create(&path, "pw-1", Some(&sk), test_profile(), 1_000).unwrap();
+
+        let path_a = temp_vault_path("adopt-empty-a");
+        let path_b = temp_vault_path("adopt-empty-b");
+        let vault = Vault::create(&path_a, "pw", Some(&sk), test_profile(), 0).unwrap();
+        let address = vault.sync_address().unwrap().to_string();
+        let package = vault.bootstrap_package().unwrap().to_vec();
+        drop(vault);
+        std::fs::write(&path_b, []).unwrap();
+        let adopted = Vault::adopt(&path_b, "pw", &sk, &package, &address).unwrap();
+        assert_eq!(adopted.sync_address(), Some(address.as_str()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    #[test]
+    fn open_missing_vault_does_not_create_a_file() {
+        let path = temp_vault_path("open-missing");
+        let sk = keys::random_bytes(KEY_LEN);
+        assert!(Vault::open(&path, "pw-1", Some(&sk)).is_err());
+        assert!(!path.exists(), "open must not plant a zero-byte file");
     }
 
     #[test]
