@@ -2,7 +2,8 @@
 name = "yobei-core"
 version = "0.1.0"
 edition = "2021"
-description = "yobei password manager core: unified record model, key hierarchy parameters, hexagonal ports, sync protocol types. No Tauri or platform dependencies."
+description = "yobei password manager core: unified entry model, key hierarchy, bootstrap/enrollment, hexagonal ports, sync protocol types. No Tauri or platform dependencies."
+authors = ["Sukirya"]
 license = "GPL-3.0-or-later"
 
 [dependencies]

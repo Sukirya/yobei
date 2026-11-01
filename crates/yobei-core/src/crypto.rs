@@ -37,7 +37,7 @@ impl Argon2idParams {
     };
 }
 
-/// AEAD for record/vault encryption.
+/// AEAD for entry/vault encryption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AeadAlgorithm {
@@ -50,8 +50,8 @@ pub enum AeadAlgorithm {
 
 /// Key hierarchy (see DESIGN.md §3):
 /// master password (+ optional secret key, combined via HKDF)
-///   -> Argon2id -> KEK -> unwraps Vault Key -> unwraps per-record keys
-///   -> AEAD encrypts record plaintext.
+///   -> Argon2id -> KEK -> unwraps Vault Key -> unwraps per-entry keys
+///   -> AEAD encrypts entry plaintext.
 /// Sharing (reserved, not implemented): a vault key can later be wrapped
 /// to another member's X25519 public key without changing this hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +80,8 @@ mod tests {
 
     #[test]
     fn defaults_do_not_go_below_owasp_floor() {
-        assert!(Argon2idParams::DEFAULT.memory_kib >= Argon2idParams::OWASP_MINIMUM.memory_kib);
+        const {
+            assert!(Argon2idParams::DEFAULT.memory_kib >= Argon2idParams::OWASP_MINIMUM.memory_kib);
+        }
     }
 }

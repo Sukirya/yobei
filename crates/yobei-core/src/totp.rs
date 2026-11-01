@@ -9,8 +9,8 @@ use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 
+use crate::entry::TotpConfig;
 use crate::keys;
-use crate::record::TotpConfig;
 
 type HmacSha1 = Hmac<Sha1>;
 type HmacSha256 = Hmac<Sha256>;
@@ -78,7 +78,12 @@ pub fn totp_code(config: &TotpConfig, at_unix_secs: u64) -> Result<String, Strin
     if secret.is_empty() {
         return Err("TOTP secret is empty".to_string());
     }
-    hotp(&secret, at_unix_secs / config.period_secs as u64, config.digits, &config.algorithm)
+    hotp(
+        &secret,
+        at_unix_secs / config.period_secs as u64,
+        config.digits,
+        &config.algorithm,
+    )
 }
 
 /// Seconds remaining in the current TOTP window.
@@ -91,7 +96,7 @@ pub fn remaining_secs(config: &TotpConfig, at_unix_secs: u64) -> u32 {
 
 /// A parsed `otpauth://totp/...` URI: the config plus the display pieces
 /// the URI carries (issuer prefix and account label), so importers can
-/// title the record sensibly.
+/// title the entry sensibly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedOtpauth {
     pub config: TotpConfig,
@@ -150,10 +155,7 @@ pub fn parse_otpauth_uri(uri: &str) -> Result<ParsedOtpauth, String> {
             continue;
         }
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        params.push((
-            percent_decode(k).to_lowercase(),
-            percent_decode(v),
-        ));
+        params.push((percent_decode(k).to_lowercase(), percent_decode(v)));
     }
     let get = |key: &str| {
         params
@@ -193,6 +195,7 @@ mod tests {
         TotpConfig {
             secret: data_encoding::BASE32.encode(seed_ascii),
             issuer: None,
+            account_name: None,
             digits: 8,
             period_secs: 30,
             algorithm: algorithm.to_string(),
@@ -259,7 +262,10 @@ mod tests {
     #[test]
     fn generated_secrets_are_usable() {
         let secret = generate_secret();
-        let cfg = TotpConfig { secret, ..TotpConfig::default() };
+        let cfg = TotpConfig {
+            secret,
+            ..TotpConfig::default()
+        };
         assert_eq!(totp_code(&cfg, 12345).unwrap().len(), 6);
     }
 }

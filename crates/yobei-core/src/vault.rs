@@ -1,29 +1,68 @@
-//! Vault file and unlocked session (DESIGN.md §7 storage ADR).
+//! Vault file and unlocked session (ADR-0001, ADR-0003).
 //!
 //! A vault is one SQLite database. The `meta` table holds the vault
 //! header — format version, the [`CryptoProfile`] (KDF params live here,
 //! not in constants, so they can be raised later), the KDF salt and the
-//! vault key wrapped under the KEK. Each record row keeps only the
+//! vault key wrapped under the KEK. Each entry row keeps only the
 //! columns list/sync logic needs in the clear (id, kind, timestamps,
 //! version, tombstone) plus the AEAD ciphertext blob produced by
 //! [`crate::keys`]. Titles and everything else stay encrypted; listing
 //! decrypts in memory, which is fine at personal-vault scale.
 //!
-//! This module is the reference storage adapter for v0.1: SQLite via
-//! rusqlite (bundled), identical on Android and desktop.
+//! This module is the reference storage adapter: SQLite via rusqlite
+//! (bundled), identical on Android and desktop.
 
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use data_encoding::BASE64;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::crypto::CryptoProfile;
+use crate::entry::{
+    AccountPayload, CardPayload, Entry, EntryKind, EntryPayload, IdentityPayload, NotePayload,
+};
 use crate::keys::{self, KDF_SALT_LEN, KEY_LEN};
-use crate::record::{Record, RecordKind};
+use crate::sync::SyncOp;
 
 pub const VAULT_FORMAT_VERSION: u32 = 1;
 const HEADER_META_KEY: &str = "vault_header";
+
+const ENTRY_UPSERT_SQL: &str = "INSERT INTO entries
+        (id, kind, created_at_ms, updated_at_ms, version, hlc, deleted, deleted_at_ms, ciphertext)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+    ON CONFLICT(id) DO UPDATE SET
+        kind = excluded.kind,
+        created_at_ms = excluded.created_at_ms,
+        updated_at_ms = excluded.updated_at_ms,
+        version = excluded.version,
+        hlc = excluded.hlc,
+        deleted = excluded.deleted,
+        deleted_at_ms = excluded.deleted_at_ms,
+        ciphertext = excluded.ciphertext";
+
+const SCHEMA_SQL: &str = "PRAGMA secure_delete = ON;
+     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+     CREATE TABLE entries (
+         id TEXT PRIMARY KEY,
+         kind TEXT NOT NULL,
+         created_at_ms INTEGER NOT NULL,
+         updated_at_ms INTEGER NOT NULL,
+         version INTEGER NOT NULL,
+         hlc INTEGER NOT NULL,
+         deleted INTEGER NOT NULL DEFAULT 0,
+         deleted_at_ms INTEGER,
+         ciphertext BLOB NOT NULL
+     );
+     CREATE INDEX idx_entries_updated ON entries(updated_at_ms);
+     CREATE TABLE outbox (
+         op_id TEXT PRIMARY KEY,
+         entry_id TEXT NOT NULL,
+         op_json TEXT NOT NULL,
+         created_at_ms INTEGER NOT NULL
+     );
+     CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultHeader {
@@ -35,16 +74,32 @@ pub struct VaultHeader {
     /// Vault key wrapped under the KEK (see keys.rs).
     pub wrapped_vault_key: Vec<u8>,
     pub created_at_ms: i64,
+    /// Sync address derived from the Secret Key (ADR-0002). Safe to publish;
+    /// only holders of the Secret Key can compute it.
+    #[serde(default)]
+    pub sync_address: Option<String>,
+    /// Sealed bootstrap package (ADR-0002), stored locally so the shell can
+    /// upload it without keeping the Secret Key in memory.
+    #[serde(default)]
+    pub bootstrap_package: Option<Vec<u8>>,
 }
 
 /// Sync-relevant metadata of one stored row (no decryption needed).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordMeta {
+pub struct EntryMeta {
     pub id: String,
     pub version: u64,
     pub hlc: u64,
     pub updated_at_ms: i64,
     pub deleted: bool,
+}
+
+/// Result of a tolerant listing: decrypted entries plus the ids of rows
+/// that could not be decrypted (ADR-0003 §7).
+#[derive(Debug, Default)]
+pub struct ListReport {
+    pub entries: Vec<Entry>,
+    pub skipped: Vec<String>,
 }
 
 /// An unlocked vault. Holds the vault key in memory (zeroized on drop);
@@ -55,20 +110,8 @@ pub struct Vault {
     vault_key: Zeroizing<[u8; KEY_LEN]>,
 }
 
-fn kind_to_str(kind: &RecordKind) -> &'static str {
-    match kind {
-        RecordKind::Account => "account",
-        RecordKind::ApiKey => "api_key",
-        RecordKind::Card => "card",
-        RecordKind::Identity => "identity",
-        RecordKind::Note => "note",
-        RecordKind::SshKey => "ssh_key",
-        RecordKind::Custom => "custom",
-    }
-}
-
 impl Vault {
-    /// Generate a fresh record/vault id (UUIDv7: time-ordered, unique).
+    /// Generate a fresh entry/vault id (UUIDv7: time-ordered, unique).
     pub fn new_id() -> String {
         uuid::Uuid::now_v7().to_string()
     }
@@ -79,6 +122,29 @@ impl Vault {
 
     pub fn header(&self) -> &VaultHeader {
         &self.header
+    }
+
+    /// Sync address derived from the Secret Key (ADR-0002).
+    pub fn sync_address(&self) -> Option<&str> {
+        self.header.sync_address.as_deref()
+    }
+
+    /// Sealed bootstrap package to upload to the sync server (ADR-0002).
+    pub fn bootstrap_package(&self) -> Option<&[u8]> {
+        self.header.bootstrap_package.as_deref()
+    }
+
+    /// Base64 of the auth key: the enrollment credential sent to the sync
+    /// server. Never log it.
+    pub fn auth_key_b64(&self) -> Result<String, String> {
+        let auth = crate::bootstrap::derive_auth_key(&*self.vault_key)?;
+        Ok(BASE64.encode(&*auth))
+    }
+
+    /// Base64 of SHA-256(auth key): what the server stores on first upload.
+    pub fn auth_hash_b64(&self) -> Result<String, String> {
+        let auth = crate::bootstrap::derive_auth_key(&*self.vault_key)?;
+        Ok(BASE64.encode(&crate::bootstrap::auth_key_hash(&auth)))
     }
 
     /// Create a new vault file. Fails if the file already exists.
@@ -92,45 +158,37 @@ impl Vault {
         if path.exists() {
             return Err("vault file already exists".to_string());
         }
-        let mut conn =
-            Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
-        conn.execute_batch(
-            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE records (
-                 id TEXT PRIMARY KEY,
-                 kind TEXT NOT NULL,
-                 created_at_ms INTEGER NOT NULL,
-                 updated_at_ms INTEGER NOT NULL,
-                 version INTEGER NOT NULL,
-                 hlc INTEGER NOT NULL,
-                 deleted INTEGER NOT NULL DEFAULT 0,
-                 ciphertext BLOB NOT NULL
-             );
-             CREATE INDEX idx_records_updated ON records(updated_at_ms);
-             CREATE TABLE outbox (
-                 op_id TEXT PRIMARY KEY,
-                 record_id TEXT NOT NULL,
-                 op_json TEXT NOT NULL,
-                 created_at_ms INTEGER NOT NULL
-             );
-             CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-        )
-        .map_err(|e| format!("init vault schema: {e}"))?;
+        // Every externally supplied parameter set is validated before use
+        // (ADR-0001 §4).
+        crate::bootstrap::validate_kdf_params(&profile.kdf_params)?;
+        // The Secret Key is mandatory (ADR-0001).
+        let secret_key = secret_key.ok_or_else(|| "a Secret Key is required".to_string())?;
+        let mut profile = profile;
+        profile.secret_key_enabled = true;
+
+        let mut conn = Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
+        conn.execute_batch(SCHEMA_SQL)
+            .map_err(|e| format!("init vault schema: {e}"))?;
 
         let salt = keys::random_bytes(KDF_SALT_LEN);
-        let kek = keys::derive_kek(password, &salt, profile.kdf_params, secret_key)?;
+        let kek = keys::derive_kek(password, &salt, profile.kdf_params, Some(secret_key))?;
         let vault_key_bytes: [u8; KEY_LEN] = keys::random_bytes(KEY_LEN)
             .try_into()
             .expect("random_bytes returns the requested length");
         let wrapped = keys::wrap_key(&kek, &vault_key_bytes)?;
-        let header = VaultHeader {
+        let sync_address = crate::bootstrap::vault_address(secret_key)?;
+        let mut header = VaultHeader {
             format_version: VAULT_FORMAT_VERSION,
             vault_id: Self::new_id(),
             profile,
             kdf_salt: salt,
             wrapped_vault_key: wrapped,
             created_at_ms: now_ms,
+            sync_address: Some(sync_address),
+            bootstrap_package: None,
         };
+        let package = Self::seal_package(&header, secret_key)?;
+        header.bootstrap_package = Some(package);
         // On any failure after file creation, remove the partial file so a
         // retry is not blocked by a half-initialized vault.
         let result = Self::store_header(&mut conn, &header);
@@ -147,9 +205,11 @@ impl Vault {
     }
 
     /// Open an existing vault. A wrong password (or wrong/missing secret
-    /// key) fails at unwrapping the vault key, before any record is read.
+    /// key) fails at unwrapping the vault key, before any entry is read.
     pub fn open(path: &Path, password: &str, secret_key: Option<&[u8]>) -> Result<Vault, String> {
-        let conn = Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
+        let mut conn = Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
+        conn.execute_batch("PRAGMA secure_delete = ON;")
+            .map_err(|e| format!("configure vault db: {e}"))?;
         let header_json: String = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = ?1",
@@ -159,31 +219,104 @@ impl Vault {
             .map_err(|_| "not a yobei vault (missing header)".to_string())?;
         let header: VaultHeader =
             serde_json::from_str(&header_json).map_err(|e| format!("corrupt vault header: {e}"))?;
+        let mut header = header;
         if header.format_version != VAULT_FORMAT_VERSION {
             return Err(format!(
                 "unsupported vault format version {}",
                 header.format_version
             ));
         }
+        crate::bootstrap::validate_kdf_params(&header.profile.kdf_params)?;
+        // The Secret Key is mandatory (ADR-0001).
+        let secret_key = secret_key.ok_or_else(|| "a Secret Key is required".to_string())?;
         let kek = keys::derive_kek(
             password,
             &header.kdf_salt,
             header.profile.kdf_params,
-            secret_key,
+            Some(secret_key),
         )?;
         let vault_key = keys::unwrap_key(&kek, &header.wrapped_vault_key)
             .map_err(|_| "wrong password or secret key".to_string())?;
+        // Derive the sync address and (re)seal the bootstrap package. The
+        // Secret Key is available here, so a package missing from an older
+        // header is repaired in place (ADR-0002).
+        let expected_address = crate::bootstrap::vault_address(secret_key)?;
+        if header.sync_address.as_deref() != Some(expected_address.as_str())
+            || header.bootstrap_package.is_none()
+        {
+            header.sync_address = Some(expected_address);
+            let package = Self::seal_package(&header, secret_key)?;
+            header.bootstrap_package = Some(package);
+            Self::store_header(&mut conn, &header)?;
+        }
         // Vaults created before the sync tables existed gain them here.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS outbox (
                  op_id TEXT PRIMARY KEY,
-                 record_id TEXT NOT NULL,
+                 entry_id TEXT NOT NULL,
                  op_json TEXT NOT NULL,
                  created_at_ms INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )
         .map_err(|e| format!("ensure sync schema: {e}"))?;
+        Ok(Vault {
+            conn,
+            header,
+            vault_key,
+        })
+    }
+
+    // ---------------------------------------------------------- adoption ---
+
+    /// Adopt an existing vault on a new device from its bootstrap package
+    /// (ADR-0002). Creates a local vault file with the same vault id and
+    /// vault key; the old device is not needed.
+    pub fn adopt(
+        path: &Path,
+        password: &str,
+        secret_key: &[u8],
+        bootstrap: &[u8],
+        address: &str,
+    ) -> Result<Vault, String> {
+        if path.exists() {
+            return Err("vault file already exists".to_string());
+        }
+        let wire = crate::bootstrap::open_bootstrap(secret_key, address, bootstrap)?;
+        if wire.format_version != VAULT_FORMAT_VERSION {
+            return Err(format!(
+                "unsupported vault format version {}",
+                wire.format_version
+            ));
+        }
+        crate::bootstrap::validate_kdf_params(&wire.kdf_params)?;
+        let kek = keys::derive_kek(password, &wire.kdf_salt, wire.kdf_params, Some(secret_key))?;
+        let vault_key = keys::unwrap_key(&kek, &wire.wrapped_vault_key)
+            .map_err(|_| "wrong password or secret key".to_string())?;
+
+        let mut conn = Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
+        conn.execute_batch(SCHEMA_SQL)
+            .map_err(|e| format!("init vault schema: {e}"))?;
+        let header = VaultHeader {
+            format_version: wire.format_version,
+            vault_id: wire.vault_id,
+            profile: CryptoProfile {
+                kdf_params: wire.kdf_params,
+                secret_key_enabled: true,
+                ..CryptoProfile::default()
+            },
+            kdf_salt: wire.kdf_salt,
+            wrapped_vault_key: wire.wrapped_vault_key,
+            created_at_ms: wire.created_at_ms,
+            sync_address: Some(address.to_string()),
+            bootstrap_package: Some(bootstrap.to_vec()),
+        };
+        let result = Self::store_header(&mut conn, &header);
+        if let Err(e) = result {
+            drop(conn);
+            let _ = std::fs::remove_file(path);
+            return Err(e);
+        }
         Ok(Vault {
             conn,
             header,
@@ -206,45 +339,151 @@ impl Vault {
         serde_json::from_str(&header_json).ok()
     }
 
-    /// Permanently remove a record row (no tombstone). Used for trash
-    /// purge and for wiping conflict copies the user resolved manually.
-    pub fn purge(&mut self, id: &str) -> Result<(), String> {
+    /// Encrypt an entry with this vault's key, producing the exact blob that
+    /// is stored locally and pushed to the sync server.
+    pub fn encrypt_entry(&self, entry: &Entry) -> Result<Vec<u8>, String> {
+        keys::encrypt_entry(&self.vault_key, entry)
+    }
+
+    /// Decrypt a blob with this vault's key (sync ingest verification).
+    pub fn decrypt_entry(&self, entry_id: &str, blob: &[u8]) -> Result<Entry, String> {
+        keys::decrypt_entry(&self.vault_key, entry_id, blob)
+    }
+
+    /// Insert or replace an entry, encrypting it under its per-entry key.
+    /// Callers manage version/timestamp semantics (see `service.rs`).
+    pub fn put(&mut self, entry: &Entry) -> Result<(), String> {
+        let blob = self.encrypt_entry(entry)?;
+        self.put_entry_blob(entry, &blob)
+    }
+
+    /// Store a pre-encrypted blob together with the entry's sync metadata.
+    /// Used by the sync ingest path, where the blob came from the server.
+    pub fn put_entry_blob(&mut self, entry: &Entry, blob: &[u8]) -> Result<(), String> {
         self.conn
-            .execute("DELETE FROM records WHERE id = ?1", params![id])
-            .map_err(|e| format!("purge record: {e}"))?;
+            .execute(
+                ENTRY_UPSERT_SQL,
+                params![
+                    entry.id,
+                    entry.kind.as_str(),
+                    entry.created_at_ms,
+                    entry.updated_at_ms,
+                    entry.version as i64,
+                    entry.hlc as i64,
+                    entry.deleted as i64,
+                    entry.deleted_at_ms,
+                    blob,
+                ],
+            )
+            .map_err(|e| format!("store entry: {e}"))?;
         Ok(())
     }
 
-    // ------------------------------------------------------------ sync ---
-
-    /// Decrypt a blob with this vault's key (sync ingest verification).
-    pub fn decrypt(&self, record_id: &str, blob: &[u8]) -> Result<Record, String> {
-        keys::decrypt_record(&self.vault_key, record_id, blob)
+    /// Insert/replace a row from raw parts — the sync ingest path, where
+    /// the blob arrives from the server rather than from local encryption.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_raw(
+        &mut self,
+        entry_id: &str,
+        kind: &EntryKind,
+        created_at_ms: i64,
+        updated_at_ms: i64,
+        version: u64,
+        hlc: u64,
+        deleted: bool,
+        deleted_at_ms: Option<i64>,
+        blob: &[u8],
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                ENTRY_UPSERT_SQL,
+                params![
+                    entry_id,
+                    kind.as_str(),
+                    created_at_ms,
+                    updated_at_ms,
+                    version as i64,
+                    hlc as i64,
+                    deleted as i64,
+                    deleted_at_ms,
+                    blob,
+                ],
+            )
+            .map_err(|e| format!("store raw entry: {e}"))?;
+        Ok(())
     }
 
-    /// The stored ciphertext blob for a record, exactly as pushed to and
+    /// Write an entry and its outbox op in one local transaction (ADR-0003
+    /// §5). Either both land or neither does.
+    pub fn write_entry_and_op(
+        &mut self,
+        entry: &Entry,
+        blob: &[u8],
+        op: &SyncOp,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        let op_json = serde_json::to_string(op).map_err(|e| format!("serialize op: {e}"))?;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| format!("begin transaction: {e}"))?;
+        tx.execute(
+            ENTRY_UPSERT_SQL,
+            params![
+                entry.id,
+                entry.kind.as_str(),
+                entry.created_at_ms,
+                entry.updated_at_ms,
+                entry.version as i64,
+                entry.hlc as i64,
+                entry.deleted as i64,
+                entry.deleted_at_ms,
+                blob,
+            ],
+        )
+        .map_err(|e| format!("store entry: {e}"))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO outbox (op_id, entry_id, op_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![op.op_id, op.entry_id, op_json, now_ms],
+        )
+        .map_err(|e| format!("enqueue op: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("commit transaction: {e}"))?;
+        Ok(())
+    }
+
+    /// Fetch one entry by id (tombstones included).
+    pub fn get_entry(&self, id: &str) -> Result<Option<Entry>, String> {
+        let blob = self.get_blob(id)?;
+        match blob {
+            None => Ok(None),
+            Some(b) => Ok(Some(keys::decrypt_entry(&self.vault_key, id, &b)?)),
+        }
+    }
+
+    /// The stored ciphertext blob for an entry, exactly as pushed to and
     /// fetched from the sync server (nonce ‖ ciphertext).
     pub fn get_blob(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
-        let blob: Option<Vec<u8>> = self
-            .conn
+        self.conn
             .query_row(
-                "SELECT ciphertext FROM records WHERE id = ?1",
+                "SELECT ciphertext FROM entries WHERE id = ?1",
                 params![id],
                 |row| row.get(0),
             )
-            .ok();
-        Ok(blob)
+            .optional()
+            .map_err(|e| format!("read entry blob: {e}"))
     }
 
     /// Sync metadata for every row, without decrypting anything.
-    pub fn record_metas(&self) -> Result<Vec<RecordMeta>, String> {
+    pub fn entry_metas(&self) -> Result<Vec<EntryMeta>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, version, hlc, updated_at_ms, deleted FROM records")
+            .prepare("SELECT id, version, hlc, updated_at_ms, deleted FROM entries")
             .map_err(|e| format!("prepare metas: {e}"))?;
         let rows = stmt
             .query_map([], |row| {
-                Ok(RecordMeta {
+                Ok(EntryMeta {
                     id: row.get(0)?,
                     version: row.get::<_, i64>(1)? as u64,
                     hlc: row.get::<_, i64>(2)? as u64,
@@ -260,61 +499,55 @@ impl Vault {
         Ok(out)
     }
 
-    /// Insert/replace a row from raw parts — the sync ingest path, where
-    /// the blob arrives from the server rather than from local encryption.
-    #[allow(clippy::too_many_arguments)]
-    pub fn put_raw(
-        &mut self,
-        record_id: &str,
-        kind: &RecordKind,
-        created_at_ms: i64,
-        updated_at_ms: i64,
-        version: u64,
-        hlc: u64,
-        deleted: bool,
-        blob: &[u8],
-    ) -> Result<(), String> {
-        self.conn
-            .execute(
-                "INSERT INTO records (id, kind, created_at_ms, updated_at_ms, version, hlc, deleted, ciphertext)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(id) DO UPDATE SET kind = excluded.kind,
-                     created_at_ms = excluded.created_at_ms,
-                     updated_at_ms = excluded.updated_at_ms, version = excluded.version,
-                     hlc = excluded.hlc, deleted = excluded.deleted,
-                     ciphertext = excluded.ciphertext",
-                params![
-                    record_id,
-                    kind_to_str(kind),
-                    created_at_ms,
-                    updated_at_ms,
-                    version as i64,
-                    hlc as i64,
-                    deleted as i64,
-                    blob,
-                ],
+    /// Decrypt every row, skipping (and reporting) rows that fail. One
+    /// corrupt row must not make the whole vault unreadable (ADR-0003 §7).
+    pub fn list_report(&self, include_deleted: bool) -> Result<ListReport, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, ciphertext FROM entries
+                 WHERE deleted = 0 OR ?1
+                 ORDER BY updated_at_ms DESC",
             )
-            .map_err(|e| format!("store raw record: {e}"))?;
-        Ok(())
+            .map_err(|e| format!("prepare list: {e}"))?;
+        let rows = stmt
+            .query_map(params![include_deleted as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|e| format!("list entries: {e}"))?;
+        let mut report = ListReport::default();
+        for row in rows {
+            let (id, blob) = row.map_err(|e| format!("read entry row: {e}"))?;
+            match keys::decrypt_entry(&self.vault_key, &id, &blob) {
+                Ok(entry) => report.entries.push(entry),
+                Err(_) => report.skipped.push(id),
+            }
+        }
+        Ok(report)
     }
 
-    /// Append an op to the local outbox. Ops are enqueued at mutation
-    /// time (see service.rs) and removed only when the server accepts
-    /// them (or a conflict resolution supersedes them).
-    pub fn enqueue_op(&mut self, op: &crate::sync::SyncOp, now_ms: i64) -> Result<(), String> {
+    /// All decrypted entries, newest-updated first.
+    pub fn list(&self, include_deleted: bool) -> Result<Vec<Entry>, String> {
+        Ok(self.list_report(include_deleted)?.entries)
+    }
+
+    // ------------------------------------------------------------ sync ---
+
+    /// Append an op to the local outbox.
+    pub fn enqueue_op(&mut self, op: &SyncOp, now_ms: i64) -> Result<(), String> {
         let json = serde_json::to_string(op).map_err(|e| format!("serialize op: {e}"))?;
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO outbox (op_id, record_id, op_json, created_at_ms)
+                "INSERT OR REPLACE INTO outbox (op_id, entry_id, op_json, created_at_ms)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![op.op_id, op.record_id, json, now_ms],
+                params![op.op_id, op.entry_id, json, now_ms],
             )
             .map_err(|e| format!("enqueue op: {e}"))?;
         Ok(())
     }
 
     /// All queued ops, oldest first (push order).
-    pub fn outbox_ops(&self) -> Result<Vec<crate::sync::SyncOp>, String> {
+    pub fn outbox_ops(&self) -> Result<Vec<SyncOp>, String> {
         let mut stmt = self
             .conn
             .prepare("SELECT op_json FROM outbox ORDER BY created_at_ms, rowid")
@@ -325,9 +558,7 @@ impl Vault {
         let mut out = Vec::new();
         for row in rows {
             let json = row.map_err(|e| format!("read outbox row: {e}"))?;
-            out.push(
-                serde_json::from_str(&json).map_err(|e| format!("corrupt outbox op: {e}"))?,
-            );
+            out.push(serde_json::from_str(&json).map_err(|e| format!("corrupt outbox op: {e}"))?);
         }
         Ok(out)
     }
@@ -339,23 +570,20 @@ impl Vault {
         Ok(())
     }
 
-    /// Drop every queued op for a record (conflict resolution supersedes
+    /// Drop every queued op for an entry (conflict resolution supersedes
     /// them). Returns how many were dropped.
-    pub fn remove_ops_for_record(&mut self, record_id: &str) -> Result<usize, String> {
+    pub fn remove_ops_for_entry(&mut self, entry_id: &str) -> Result<usize, String> {
         let n = self
             .conn
-            .execute(
-                "DELETE FROM outbox WHERE record_id = ?1",
-                params![record_id],
-            )
-            .map_err(|e| format!("remove record ops: {e}"))?;
+            .execute("DELETE FROM outbox WHERE entry_id = ?1", params![entry_id])
+            .map_err(|e| format!("remove entry ops: {e}"))?;
         Ok(n)
     }
 
-    pub fn pending_record_ids(&self) -> Result<std::collections::HashSet<String>, String> {
+    pub fn pending_entry_ids(&self) -> Result<std::collections::HashSet<String>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT DISTINCT record_id FROM outbox")
+            .prepare("SELECT DISTINCT entry_id FROM outbox")
             .map_err(|e| format!("prepare pending: {e}"))?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -388,97 +616,38 @@ impl Vault {
         Ok(())
     }
 
-    fn store_header(conn: &mut Connection, header: &VaultHeader) -> Result<(), String> {
-        let json = serde_json::to_string(header).map_err(|e| format!("serialize header: {e}"))?;
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![HEADER_META_KEY, json],
-        )
-        .map_err(|e| format!("store header: {e}"))?;
-        Ok(())
-    }
-
-    /// Insert or replace a record, encrypting it under its per-record key.
-    /// Callers manage `version`/`updated_at_ms` semantics via the record
-    /// they pass in (see `touch` in higher layers); this stores as given.
-    pub fn put(&mut self, record: &Record) -> Result<(), String> {
-        let blob = keys::encrypt_record(&self.vault_key, record)?;
+    /// Forget a sync state entry (e.g. after this device is revoked).
+    pub fn clear_sync_state(&mut self, key: &str) -> Result<(), String> {
         self.conn
-            .execute(
-                "INSERT INTO records (id, kind, created_at_ms, updated_at_ms, version, hlc, deleted, ciphertext)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(id) DO UPDATE SET kind = excluded.kind,
-                     updated_at_ms = excluded.updated_at_ms, version = excluded.version,
-                     hlc = excluded.hlc, deleted = excluded.deleted,
-                     ciphertext = excluded.ciphertext",
-                params![
-                    record.id,
-                    kind_to_str(&record.kind),
-                    record.created_at_ms,
-                    record.updated_at_ms,
-                    record.version as i64,
-                    record.hlc as i64,
-                    record.deleted as i64,
-                    blob,
-                ],
-            )
-            .map_err(|e| format!("store record: {e}"))?;
+            .execute("DELETE FROM sync_meta WHERE key = ?1", params![key])
+            .map_err(|e| format!("clear sync state: {e}"))?;
         Ok(())
     }
 
-    /// Fetch one record by id (tombstones included).
-    pub fn get(&self, id: &str) -> Result<Option<Record>, String> {
-        let blob: Option<Vec<u8>> = self
-            .conn
-            .query_row(
-                "SELECT ciphertext FROM records WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .ok();
-        match blob {
-            None => Ok(None),
-            Some(b) => Ok(Some(keys::decrypt_record(&self.vault_key, id, &b)?)),
+    /// Remove the content of an already-deleted entry while keeping its
+    /// tombstone metadata (ADR-0003 §4). Called after the 30-day window.
+    /// Returns true if the entry existed.
+    pub fn purge_content(&mut self, id: &str) -> Result<bool, String> {
+        let Some(mut entry) = self.get_entry(id)? else {
+            return Ok(false);
+        };
+        if !entry.deleted {
+            return Err("refusing to purge a live entry".to_string());
         }
+        entry.title.clear();
+        entry.favorite = false;
+        entry.tags.clear();
+        entry.notes.clear();
+        entry.payload = blank_payload(entry.kind);
+        self.put(&entry)?;
+        // Drop the free pages that still hold the old ciphertext.
+        self.conn
+            .execute_batch("VACUUM;")
+            .map_err(|e| format!("vacuum vault: {e}"))?;
+        Ok(true)
     }
 
-    /// All records, newest-updated first. Tombstones only when requested.
-    pub fn list(&self, include_deleted: bool) -> Result<Vec<Record>, String> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT id, ciphertext FROM records
-                 WHERE deleted = 0 OR ?1
-                 ORDER BY updated_at_ms DESC",
-            )
-            .map_err(|e| format!("prepare list: {e}"))?;
-        let rows = stmt
-            .query_map(params![include_deleted as i64], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(|e| format!("list records: {e}"))?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, blob) = row.map_err(|e| format!("read record row: {e}"))?;
-            out.push(keys::decrypt_record(&self.vault_key, &id, &blob)?);
-        }
-        Ok(out)
-    }
-
-    /// Soft-delete: the record becomes a tombstone (kept for sync delete
-    /// propagation), bumping version and timestamp like any mutation.
-    pub fn soft_delete(&mut self, id: &str, now_ms: i64) -> Result<(), String> {
-        let mut record = self
-            .get(id)?
-            .ok_or_else(|| "record not found".to_string())?;
-        record.deleted = true;
-        record.updated_at_ms = now_ms;
-        record.version += 1;
-        self.put(&record)
-    }
-
-    /// Change the master password. Records are untouched: only the vault
+    /// Change the master password. Entries are untouched: only the vault
     /// key is re-wrapped under a KEK from the new password (fresh salt).
     pub fn change_password(
         &mut self,
@@ -486,11 +655,12 @@ impl Vault {
         new_password: &str,
         secret_key: Option<&[u8]>,
     ) -> Result<(), String> {
+        let secret_key = secret_key.ok_or_else(|| "the Secret Key is required".to_string())?;
         let old_kek = keys::derive_kek(
             old_password,
             &self.header.kdf_salt,
             self.header.profile.kdf_params,
-            secret_key,
+            Some(secret_key),
         )?;
         let check = keys::unwrap_key(&old_kek, &self.header.wrapped_vault_key)
             .map_err(|_| "wrong current password".to_string())?;
@@ -502,11 +672,55 @@ impl Vault {
             new_password,
             &new_salt,
             self.header.profile.kdf_params,
-            secret_key,
+            Some(secret_key),
         )?;
         self.header.kdf_salt = new_salt;
         self.header.wrapped_vault_key = keys::wrap_key(&new_kek, &self.vault_key)?;
+        // The bootstrap package wraps the same vault key under the same
+        // Secret Key, but the salt and wrapped key changed; reseal it so a
+        // new device can still join (ADR-0002).
+        self.header.bootstrap_package = None;
+        let package = Self::seal_package(&self.header, secret_key)?;
+        self.header.bootstrap_package = Some(package);
         Self::store_header(&mut self.conn, &self.header)
+    }
+
+    /// Build and seal the bootstrap package from this vault's header.
+    fn seal_package(header: &VaultHeader, secret_key: &[u8]) -> Result<Vec<u8>, String> {
+        let address = header
+            .sync_address
+            .as_deref()
+            .ok_or_else(|| "vault has no sync address".to_string())?;
+        let wire = crate::bootstrap::BootstrapHeader {
+            format_version: header.format_version,
+            vault_id: header.vault_id.clone(),
+            address: address.to_string(),
+            kdf_params: header.profile.kdf_params,
+            kdf_salt: header.kdf_salt.clone(),
+            wrapped_vault_key: header.wrapped_vault_key.clone(),
+            created_at_ms: header.created_at_ms,
+        };
+        crate::bootstrap::seal_bootstrap(secret_key, &wire)
+    }
+
+    fn store_header(conn: &mut Connection, header: &VaultHeader) -> Result<(), String> {
+        let json = serde_json::to_string(header).map_err(|e| format!("serialize header: {e}"))?;
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![HEADER_META_KEY, json],
+        )
+        .map_err(|e| format!("store header: {e}"))?;
+        Ok(())
+    }
+}
+
+fn blank_payload(kind: EntryKind) -> EntryPayload {
+    match kind {
+        EntryKind::Account => EntryPayload::Account(AccountPayload::default()),
+        EntryKind::Card => EntryPayload::Card(CardPayload::default()),
+        EntryKind::Identity => EntryPayload::Identity(IdentityPayload::default()),
+        EntryKind::Note => EntryPayload::Note(NotePayload::default()),
     }
 }
 
@@ -517,7 +731,7 @@ mod tests {
 
     fn test_profile() -> CryptoProfile {
         CryptoProfile {
-            kdf_params: Argon2idParams { memory_kib: 8 * 1024, iterations: 1, parallelism: 1 },
+            kdf_params: Argon2idParams::OWASP_MINIMUM,
             ..CryptoProfile::default()
         }
     }
@@ -527,20 +741,29 @@ mod tests {
     }
 
     #[test]
-    fn create_open_roundtrip_with_records() {
+    fn create_open_roundtrip_with_entries() {
         let path = temp_vault_path("roundtrip");
-        let mut vault =
-            Vault::create(&path, "pw-1", None, test_profile(), 1_000).unwrap();
-        let mut record =
-            Record::new_account(Vault::new_id(), vault.vault_id().to_string(), "GitHub".into(), 1_000);
-        record.account.as_mut().unwrap().username = "octocat".into();
-        vault.put(&record).unwrap();
-        let record_id = record.id.clone();
+        let sk = keys::random_bytes(KEY_LEN);
+        let mut vault = Vault::create(&path, "pw-1", Some(&sk), test_profile(), 1_000).unwrap();
+        let mut entry = Entry::new_account(
+            Vault::new_id(),
+            vault.vault_id().to_string(),
+            "GitHub".into(),
+            1_000,
+        );
+        if let EntryPayload::Account(account) = &mut entry.payload {
+            account.username = "octocat".into();
+        }
+        vault.put(&entry).unwrap();
+        let entry_id = entry.id.clone();
         drop(vault);
 
-        let reopened = Vault::open(&path, "pw-1", None).unwrap();
-        let loaded = reopened.get(&record_id).unwrap().unwrap();
-        assert_eq!(loaded.account.unwrap().username, "octocat");
+        let reopened = Vault::open(&path, "pw-1", Some(&sk)).unwrap();
+        let loaded = reopened.get_entry(&entry_id).unwrap().unwrap();
+        match loaded.payload {
+            EntryPayload::Account(account) => assert_eq!(account.username, "octocat"),
+            _ => panic!("expected an account entry"),
+        }
         assert_eq!(reopened.list(false).unwrap().len(), 1);
         let _ = std::fs::remove_file(&path);
     }
@@ -548,48 +771,153 @@ mod tests {
     #[test]
     fn wrong_password_cannot_open() {
         let path = temp_vault_path("wrongpw");
-        let vault = Vault::create(&path, "right", None, test_profile(), 0).unwrap();
+        let sk = keys::random_bytes(KEY_LEN);
+        let vault = Vault::create(&path, "right", Some(&sk), test_profile(), 0).unwrap();
         drop(vault);
-        assert!(Vault::open(&path, "wrong", None).is_err());
+        assert!(Vault::open(&path, "wrong", Some(&sk)).is_err());
+        // The Secret Key is load-bearing: the right password with a wrong
+        // Secret Key must also fail.
+        let wrong_sk = keys::random_bytes(KEY_LEN);
+        assert!(Vault::open(&path, "right", Some(&wrong_sk)).is_err());
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn change_password_keeps_records_readable() {
+    fn change_password_keeps_entries_readable() {
         let path = temp_vault_path("changepw");
-        let mut vault = Vault::create(&path, "old-pw", None, test_profile(), 0).unwrap();
-        let record = Record::new_account(
+        let sk = keys::random_bytes(KEY_LEN);
+        let mut vault = Vault::create(&path, "old-pw", Some(&sk), test_profile(), 0).unwrap();
+        let entry = Entry::new_account(
             Vault::new_id(),
             vault.vault_id().to_string(),
             "Mail".into(),
             0,
         );
-        let record_id = record.id.clone();
-        vault.put(&record).unwrap();
-        vault.change_password("old-pw", "new-pw", None).unwrap();
+        let entry_id = entry.id.clone();
+        vault.put(&entry).unwrap();
+        vault
+            .change_password("old-pw", "new-pw", Some(&sk))
+            .unwrap();
         drop(vault);
 
-        assert!(Vault::open(&path, "old-pw", None).is_err());
-        let reopened = Vault::open(&path, "new-pw", None).unwrap();
-        assert!(reopened.get(&record_id).unwrap().is_some());
+        assert!(Vault::open(&path, "old-pw", Some(&sk)).is_err());
+        let reopened = Vault::open(&path, "new-pw", Some(&sk)).unwrap();
+        assert!(reopened.get_entry(&entry_id).unwrap().is_some());
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn soft_delete_leaves_a_tombstone() {
+    fn adopt_rebuilds_the_same_vault_from_the_bootstrap_package() {
+        let sk = keys::random_bytes(KEY_LEN);
+        let path_a = temp_vault_path("adopt-a");
+        let path_b = temp_vault_path("adopt-b");
+        let vault = Vault::create(&path_a, "pw", Some(&sk), test_profile(), 0).unwrap();
+        let address = vault.sync_address().unwrap().to_string();
+        let package = vault.bootstrap_package().unwrap().to_vec();
+        let vault_id = vault.vault_id().to_string();
+        drop(vault);
+
+        let adopted = Vault::adopt(&path_b, "pw", &sk, &package, &address).unwrap();
+        assert_eq!(adopted.vault_id(), vault_id);
+        assert_eq!(adopted.sync_address(), Some(address.as_str()));
+
+        // A wrong password cannot adopt the vault.
+        let path_c = temp_vault_path("adopt-c");
+        assert!(Vault::adopt(&path_c, "wrong", &sk, &package, &address).is_err());
+
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    #[test]
+    fn auth_key_is_stable_across_adoption() {
+        let sk = keys::random_bytes(KEY_LEN);
+        let path_a = temp_vault_path("auth-a");
+        let path_b = temp_vault_path("auth-b");
+        let vault = Vault::create(&path_a, "pw", Some(&sk), test_profile(), 0).unwrap();
+        let address = vault.sync_address().unwrap().to_string();
+        let package = vault.bootstrap_package().unwrap().to_vec();
+        let auth_key = vault.auth_key_b64().unwrap();
+        let auth_hash = vault.auth_hash_b64().unwrap();
+        drop(vault);
+
+        let adopted = Vault::adopt(&path_b, "pw", &sk, &package, &address).unwrap();
+        assert_eq!(adopted.auth_key_b64().unwrap(), auth_key);
+        assert_eq!(adopted.auth_hash_b64().unwrap(), auth_hash);
+
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    #[test]
+    fn password_change_refreshes_the_bootstrap_package() {
+        let sk = keys::random_bytes(KEY_LEN);
+        let path_a = temp_vault_path("rotate-a");
+        let path_b = temp_vault_path("rotate-b");
+        let path_c = temp_vault_path("rotate-c");
+        let mut vault = Vault::create(&path_a, "old", Some(&sk), test_profile(), 0).unwrap();
+        let vault_id = vault.vault_id().to_string();
+        let address = vault.sync_address().unwrap().to_string();
+        let before = vault.bootstrap_package().unwrap().to_vec();
+        vault.change_password("old", "new", Some(&sk)).unwrap();
+        let after = vault.bootstrap_package().unwrap().to_vec();
+        assert_ne!(before, after);
+        drop(vault);
+
+        // The refreshed package unlocks with the new password.
+        let adopted = Vault::adopt(&path_b, "new", &sk, &after, &address).unwrap();
+        assert_eq!(adopted.vault_id(), vault_id);
+        // The stale package must not unlock with the new password.
+        assert!(Vault::adopt(&path_c, "new", &sk, &before, &address).is_err());
+
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    #[test]
+    fn tombstones_are_listed_only_when_requested() {
         let path = temp_vault_path("delete");
-        let mut vault = Vault::create(&path, "pw", None, test_profile(), 0).unwrap();
-        let record =
-            Record::new_account(Vault::new_id(), vault.vault_id().to_string(), "X".into(), 0);
-        let record_id = record.id.clone();
-        vault.put(&record).unwrap();
-        vault.soft_delete(&record_id, 5_000).unwrap();
+        let sk = keys::random_bytes(KEY_LEN);
+        let mut vault = Vault::create(&path, "pw", Some(&sk), test_profile(), 0).unwrap();
+        let mut entry =
+            Entry::new_account(Vault::new_id(), vault.vault_id().to_string(), "X".into(), 0);
+        entry.deleted = true;
+        entry.deleted_at_ms = Some(5_000);
+        vault.put(&entry).unwrap();
 
         assert!(vault.list(false).unwrap().is_empty());
         let all = vault.list(true).unwrap();
         assert_eq!(all.len(), 1);
         assert!(all[0].deleted);
-        assert_eq!(all[0].version, 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn purge_content_blanks_payload_but_keeps_tombstone() {
+        let path = temp_vault_path("purge");
+        let sk = keys::random_bytes(KEY_LEN);
+        let mut vault = Vault::create(&path, "pw", Some(&sk), test_profile(), 0).unwrap();
+        let mut entry = Entry::new_account(
+            Vault::new_id(),
+            vault.vault_id().to_string(),
+            "Old".into(),
+            0,
+        );
+        if let EntryPayload::Account(account) = &mut entry.payload {
+            account.password = Some("secret".into());
+        }
+        entry.deleted = true;
+        entry.deleted_at_ms = Some(1_000);
+        let entry_id = entry.id.clone();
+        vault.put(&entry).unwrap();
+
+        assert!(vault.purge_content(&entry_id).unwrap());
+        let purged = vault.get_entry(&entry_id).unwrap().unwrap();
+        assert!(purged.deleted);
+        match purged.payload {
+            EntryPayload::Account(account) => assert!(account.password.is_none()),
+            _ => panic!("expected an account entry"),
+        }
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -8,8 +8,8 @@
 //!
 //! Platform adapters (Android Credential Manager, Windows) transport
 //! the platform's create/get requests into these calls and persist the
-//! returned credential inside the account record; the private key never
-//! leaves the encrypted record.
+//! returned credential inside the account entry; the private key never
+//! leaves the encrypted entry.
 
 use ciborium::Value;
 use p256::ecdsa::signature::{Signer, Verifier};
@@ -18,8 +18,8 @@ use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 
+use crate::entry::PasskeyCredential;
 use crate::keys;
-use crate::record::PasskeyCredential;
 
 /// yobei's authenticator AAGUID ("yobei-passkey-01" as bytes). Identifies
 /// the authenticator model in attested credential data.
@@ -31,8 +31,13 @@ const FLAG_BE: u8 = 0x08;
 const FLAG_BS: u8 = 0x10;
 const FLAG_AT: u8 = 0x40;
 
-fn flags(attested: bool, backup_eligible: bool, backed_up: bool) -> u8 {
-    let mut f = FLAG_UP | FLAG_UV;
+fn flags(attested: bool, user_verified: bool, backup_eligible: bool, backed_up: bool) -> u8 {
+    let mut f = FLAG_UP;
+    // UV is a claim that the authenticator verified the user. Only set it
+    // when the platform actually performed that check (ADR-0004).
+    if user_verified {
+        f |= FLAG_UV;
+    }
     if attested {
         f |= FLAG_AT;
     }
@@ -52,9 +57,7 @@ fn rp_id_hash(rp_id: &str) -> [u8; 32] {
 }
 
 fn cose_public_key(signing_key: &SigningKey) -> Result<Vec<u8>, String> {
-    let point = signing_key
-        .verifying_key()
-        .to_encoded_point(false);
+    let point = signing_key.verifying_key().to_encoded_point(false);
     let x = point.x().ok_or("missing x coordinate")?;
     let y = point.y().ok_or("missing y coordinate")?;
     let cose = Value::Map(vec![
@@ -88,17 +91,35 @@ fn authenticator_data(
     data
 }
 
+/// Parameters for [`create_credential`]. Grouped into one struct so the
+/// constructor stays under clippy's argument limit.
+#[derive(Debug, Clone)]
+pub struct CreateCredentialParams {
+    pub rp_id: String,
+    pub rp_name: Option<String>,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
+    pub user_handle: Vec<u8>,
+    pub discoverable: bool,
+    pub user_verified: bool,
+    pub now_ms: i64,
+}
+
 /// Create a new passkey credential. Returns the credential (to store in
-/// the account record) and the attestation object for the RP.
+/// the account entry) and the attestation object for the RP.
 pub fn create_credential(
-    rp_id: &str,
-    rp_name: Option<String>,
-    user_name: Option<String>,
-    user_display_name: Option<String>,
-    user_handle: Vec<u8>,
-    discoverable: bool,
-    now_ms: i64,
+    params: CreateCredentialParams,
 ) -> Result<(PasskeyCredential, Vec<u8>), String> {
+    let CreateCredentialParams {
+        rp_id,
+        rp_name,
+        user_name,
+        user_display_name,
+        user_handle,
+        discoverable,
+        user_verified,
+        now_ms,
+    } = params;
     let signing_key = SigningKey::random(&mut OsRng);
     let private_key_pkcs8 = signing_key
         .to_pkcs8_der()
@@ -108,7 +129,7 @@ pub fn create_credential(
     let public_key_cose = cose_public_key(&signing_key)?;
     let credential = PasskeyCredential {
         credential_id: keys::random_bytes(32),
-        rp_id: rp_id.to_string(),
+        rp_id: rp_id.clone(),
         rp_name,
         user_name,
         user_display_name,
@@ -124,8 +145,13 @@ pub fn create_credential(
         created_at_ms: now_ms,
     };
     let auth_data = authenticator_data(
-        rp_id,
-        flags(true, credential.backup_eligible, credential.backed_up),
+        &rp_id,
+        flags(
+            true,
+            user_verified,
+            credential.backup_eligible,
+            credential.backed_up,
+        ),
         0,
         Some((&credential, &public_key_cose)),
     );
@@ -151,11 +177,12 @@ pub struct Assertion {
 }
 
 /// Produce an assertion for a stored credential. Increments the
-/// credential's sign counter (the caller persists the record).
+/// credential's sign counter (the caller persists the entry).
 pub fn create_assertion(
     credential: &mut PasskeyCredential,
     rp_id: &str,
     client_data_json: &[u8],
+    user_verified: bool,
 ) -> Result<Assertion, String> {
     if credential.rp_id != rp_id {
         return Err(format!(
@@ -166,7 +193,12 @@ pub fn create_assertion(
     credential.sign_count = credential.sign_count.saturating_add(1);
     let auth_data = authenticator_data(
         rp_id,
-        flags(false, credential.backup_eligible, credential.backed_up),
+        flags(
+            false,
+            user_verified,
+            credential.backup_eligible,
+            credential.backed_up,
+        ),
         credential.sign_count,
         None,
     );
@@ -194,8 +226,8 @@ pub fn verify_assertion(
     client_data_json: &[u8],
     signature_der: &[u8],
 ) -> Result<bool, String> {
-    let cose: Value = ciborium::de::from_reader(public_key_cose)
-        .map_err(|e| format!("COSE decode: {e}"))?;
+    let cose: Value =
+        ciborium::de::from_reader(public_key_cose).map_err(|e| format!("COSE decode: {e}"))?;
     let map = cose.as_map().ok_or("COSE key is not a map")?;
     let get_bytes = |key: i64| -> Result<Vec<u8>, String> {
         map.iter()
@@ -234,15 +266,16 @@ mod tests {
 
     #[test]
     fn created_credential_has_valid_attestation_structure() {
-        let (cred, attestation) = create_credential(
-            "github.com",
-            Some("GitHub".into()),
-            Some("octocat".into()),
-            None,
-            vec![1, 2, 3],
-            true,
-            1_000,
-        )
+        let (cred, attestation) = create_credential(CreateCredentialParams {
+            rp_id: "github.com".into(),
+            rp_name: Some("GitHub".into()),
+            user_name: Some("octocat".into()),
+            user_display_name: None,
+            user_handle: vec![1, 2, 3],
+            discoverable: true,
+            user_verified: true,
+            now_ms: 1_000,
+        })
         .unwrap();
         let parsed: Value = ciborium::de::from_reader(attestation.as_slice()).unwrap();
         let map = parsed.as_map().unwrap();
@@ -268,18 +301,19 @@ mod tests {
 
     #[test]
     fn assertion_signature_verifies_and_counter_advances() {
-        let (mut cred, _) = create_credential(
-            "example.com",
-            None,
-            Some("alice".into()),
-            None,
-            vec![7],
-            true,
-            0,
-        )
+        let (mut cred, _) = create_credential(CreateCredentialParams {
+            rp_id: "example.com".into(),
+            rp_name: None,
+            user_name: Some("alice".into()),
+            user_display_name: None,
+            user_handle: vec![7],
+            discoverable: true,
+            user_verified: true,
+            now_ms: 0,
+        })
         .unwrap();
         let cd = client_data("abc123", "https://example.com");
-        let first = create_assertion(&mut cred, "example.com", &cd).unwrap();
+        let first = create_assertion(&mut cred, "example.com", &cd, true).unwrap();
         assert_eq!(first.sign_count, 1);
         assert!(verify_assertion(
             &cred.public_key_cose,
@@ -299,9 +333,9 @@ mod tests {
         )
         .unwrap());
 
-        let second = create_assertion(&mut cred, "example.com", &cd).unwrap();
+        let second = create_assertion(&mut cred, "example.com", &cd, true).unwrap();
         assert_eq!(second.sign_count, 2);
         // Wrong rp is refused before signing anything.
-        assert!(create_assertion(&mut cred, "evil.com", &cd).is_err());
+        assert!(create_assertion(&mut cred, "evil.com", &cd, true).is_err());
     }
 }

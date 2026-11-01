@@ -1,14 +1,13 @@
-//! Key hierarchy implementation (DESIGN.md §3), wrapping audited
-//! RustCrypto crates only — no home-grown cryptography.
+//! Key hierarchy implementation (ADR-0001), wrapping audited RustCrypto
+//! crates only — no home-grown cryptography.
 //!
 //! master password ──Argon2id(salt, params)──> master key
-//!   └─ if a secret key is enabled: HKDF-SHA256(salt = secret key,
-//!      info = "yobei-kek-v1") ──> KEK
+//!   └─ HKDF-SHA256(salt = Secret Key, info = "yobei-kek-v1") ──> KEK
 //! KEK ──XChaCha20-Poly1305 wrap──> vault key (random 32 bytes)
-//! vault key ──HKDF-SHA256(info = "yobei-record-v1:<id>")──> per-record key
-//! per-record key ──XChaCha20-Poly1305, AAD = record id──> record ciphertext
+//! vault key ──HKDF-SHA256(info = "yobei-entry-v1:<id>")──> per-entry key
+//! per-entry key ──XChaCha20-Poly1305, AAD = entry id──> entry ciphertext
 //!
-//! Because records are encrypted under the vault key (never the KEK),
+//! Because entries are encrypted under the vault key (never the KEK),
 //! changing the master password only re-wraps the vault key.
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -21,14 +20,14 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::crypto::Argon2idParams;
-use crate::record::Record;
+use crate::entry::Entry;
 
 pub const KEY_LEN: usize = 32;
 pub const KDF_SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24; // XChaCha20-Poly1305
 const WRAP_AAD: &[u8] = b"yobei-vault-key-wrap-v1";
 const KEK_INFO: &[u8] = b"yobei-kek-v1";
-const RECORD_INFO_PREFIX: &str = "yobei-record-v1:";
+const ENTRY_INFO_PREFIX: &str = "yobei-entry-v1:";
 
 pub fn random_bytes(len: usize) -> Vec<u8> {
     let mut buf = vec![0u8; len];
@@ -38,9 +37,9 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
 
 /// Derive the key-encryption key from the master password.
 ///
-/// The optional secret key participates as the HKDF salt (the design
-/// borrowed from the reference project): a load-bearing test below proves
-/// the same password with a different secret key cannot unwrap a vault.
+/// The mandatory Secret Key participates as the HKDF salt. A load-bearing
+/// test below proves that the same password with a different Secret Key
+/// cannot unwrap a vault (ADR-0001).
 pub fn derive_kek(
     password: &str,
     salt: &[u8],
@@ -77,7 +76,10 @@ fn aead_encrypt(key: &[u8; KEY_LEN], plaintext: &[u8], aad: &[u8]) -> Result<Vec
     let ct = cipher
         .encrypt(
             XNonce::from_slice(&nonce),
-            Payload { msg: plaintext, aad },
+            Payload {
+                msg: plaintext,
+                aad,
+            },
         )
         .map_err(|_| "AEAD encrypt failed".to_string())?;
     let mut out = nonce;
@@ -93,7 +95,10 @@ fn aead_decrypt(key: &[u8; KEY_LEN], blob: &[u8], aad: &[u8]) -> Result<Vec<u8>,
     cipher
         .decrypt(
             XNonce::from_slice(&blob[..NONCE_LEN]),
-            Payload { msg: &blob[NONCE_LEN..], aad },
+            Payload {
+                msg: &blob[NONCE_LEN..],
+                aad,
+            },
         )
         .map_err(|_| "AEAD decrypt failed (wrong key or corrupted data)".to_string())
 }
@@ -126,10 +131,10 @@ pub fn decrypt_blob(key: &[u8; KEY_LEN], blob: &[u8]) -> Result<Vec<u8>, String>
     aead_decrypt(key, blob, BLOB_AAD)
 }
 
-/// Per-record key: HKDF from the vault key, bound to the record id, so a
-/// ciphertext copied onto another record's row cannot be decrypted there.
-pub fn record_key(vault_key: &[u8; KEY_LEN], record_id: &str) -> [u8; KEY_LEN] {
-    let info = format!("{RECORD_INFO_PREFIX}{record_id}");
+/// Per-entry key: HKDF from the vault key, bound to the entry id, so a
+/// ciphertext copied onto another entry's row cannot be decrypted there.
+pub fn entry_key(vault_key: &[u8; KEY_LEN], entry_id: &str) -> [u8; KEY_LEN] {
+    let info = format!("{ENTRY_INFO_PREFIX}{entry_id}");
     let hk = Hkdf::<Sha256>::new(None, vault_key);
     let mut key = [0u8; KEY_LEN];
     hk.expand(info.as_bytes(), &mut key)
@@ -137,28 +142,33 @@ pub fn record_key(vault_key: &[u8; KEY_LEN], record_id: &str) -> [u8; KEY_LEN] {
     key
 }
 
-/// Encrypt a record for storage/sync. Output is `nonce ‖ ciphertext`.
-pub fn encrypt_record(vault_key: &[u8; KEY_LEN], record: &Record) -> Result<Vec<u8>, String> {
-    let key = record_key(vault_key, &record.id);
-    let json = serde_json::to_vec(record).map_err(|e| format!("serialize record: {e}"))?;
-    aead_encrypt(&key, &json, record.id.as_bytes())
+/// Encrypt an entry for storage/sync. Output is `nonce ‖ ciphertext`.
+///
+/// The version/HLC/tombstone fields live inside the AEAD plaintext, so the
+/// server cannot present old content as a new version (ADR-0003).
+pub fn encrypt_entry(vault_key: &[u8; KEY_LEN], entry: &Entry) -> Result<Vec<u8>, String> {
+    entry.validate()?;
+    let key = entry_key(vault_key, &entry.id);
+    let json = serde_json::to_vec(entry).map_err(|e| format!("serialize entry: {e}"))?;
+    aead_encrypt(&key, &json, entry.id.as_bytes())
 }
 
-/// Decrypt a record blob. Fails if the blob was stored under a different
-/// record id (AAD and key derivation both bind to the id).
-pub fn decrypt_record(
+/// Decrypt an entry blob. Fails if the blob was stored under a different
+/// entry id (AAD and key derivation both bind to the id).
+pub fn decrypt_entry(
     vault_key: &[u8; KEY_LEN],
-    record_id: &str,
+    entry_id: &str,
     blob: &[u8],
-) -> Result<Record, String> {
-    let key = record_key(vault_key, record_id);
-    let json = aead_decrypt(&key, blob, record_id.as_bytes())?;
-    let record: Record =
-        serde_json::from_slice(&json).map_err(|e| format!("deserialize record: {e}"))?;
-    if record.id != record_id {
-        return Err("record id mismatch after decrypt".to_string());
+) -> Result<Entry, String> {
+    let key = entry_key(vault_key, entry_id);
+    let json = aead_decrypt(&key, blob, entry_id.as_bytes())?;
+    let entry: Entry =
+        serde_json::from_slice(&json).map_err(|e| format!("deserialize entry: {e}"))?;
+    if entry.id != entry_id {
+        return Err("entry id mismatch after decrypt".to_string());
     }
-    Ok(record)
+    entry.validate()?;
+    Ok(entry)
 }
 
 #[cfg(test)]
@@ -167,7 +177,11 @@ mod tests {
     use crate::crypto::Argon2idParams;
 
     fn fast_params() -> Argon2idParams {
-        Argon2idParams { memory_kib: 8 * 1024, iterations: 1, parallelism: 1 }
+        Argon2idParams {
+            memory_kib: 8 * 1024,
+            iterations: 1,
+            parallelism: 1,
+        }
     }
 
     #[test]
@@ -184,8 +198,8 @@ mod tests {
 
     #[test]
     fn secret_key_is_load_bearing() {
-        // Borrowed from the reference project: with a secret key enabled,
-        // the password alone (or the wrong secret key) must not unwrap.
+        // With a Secret Key required, the password alone (or a wrong Secret
+        // Key) must not unwrap a vault (ADR-0001).
         let salt = random_bytes(KDF_SALT_LEN);
         let sk_a = random_bytes(32);
         let sk_b = random_bytes(32);
@@ -201,12 +215,12 @@ mod tests {
     }
 
     #[test]
-    fn record_ciphertext_is_bound_to_its_id() {
+    fn entry_ciphertext_is_bound_to_its_id() {
         let vault_key: [u8; KEY_LEN] = random_bytes(KEY_LEN).try_into().unwrap();
-        let record = Record::new_account("id-a".into(), "v1".into(), "GitHub".into(), 1_000);
-        let blob = encrypt_record(&vault_key, &record).unwrap();
-        assert_eq!(decrypt_record(&vault_key, "id-a", &blob).unwrap(), record);
-        // Same blob presented as another record must fail, not migrate.
-        assert!(decrypt_record(&vault_key, "id-b", &blob).is_err());
+        let entry = Entry::new_account("id-a".into(), "v1".into(), "GitHub".into(), 1_000);
+        let blob = encrypt_entry(&vault_key, &entry).unwrap();
+        assert_eq!(decrypt_entry(&vault_key, "id-a", &blob).unwrap(), entry);
+        // Same blob presented as another entry must fail, not migrate.
+        assert!(decrypt_entry(&vault_key, "id-b", &blob).is_err());
     }
 }

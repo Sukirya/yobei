@@ -107,27 +107,216 @@ pub fn generate_password(options: &GeneratorOptions) -> Result<String, String> {
 /// large list is the long-term choice; this list keeps the feature
 /// self-contained, and the entropy math uses the real list size.)
 const WORDS: &[&str] = &[
-    "apple", "arrow", "aspen", "atlas", "bacon", "badge", "bagel", "bamboo", "banjo", "barley",
-    "basin", "basket", "beacon", "beaver", "berry", "birch", "bishop", "blanket", "blaze", "blend",
-    "breeze", "brick", "bridge", "bronze", "brook", "bubble", "bucket", "butter", "cabin", "cable",
-    "cactus", "candle", "cannon", "canvas", "canyon", "carpet", "carrot", "castle", "cedar", "chalk",
-    "charm", "cherry", "chest", "cider", "cinder", "citrus", "cliff", "clover", "coast", "cobalt",
-    "coffee", "comet", "compass", "copper", "coral", "corner", "cosmos", "cotton", "couch", "cougar",
-    "coyote", "cradle", "crane", "crater", "cricket", "crystal", "currant", "curtain", "dagger", "daisy",
-    "dandelion", "dawn", "delta", "desert", "dew", "diamond", "diesel", "dinner", "dolphin", "donkey",
-    "donut", "dove", "dragon", "dream", "drift", "drum", "dune", "dusk", "dusty", "eagle",
-    "earth", "echo", "ecology", "edge", "elder", "elm", "ember", "emerald", "engine", "envoy",
-    "epoch", "equinox", "estate", "ether", "evening", "falcon", "fable", "fabric", "factor", "fennel",
-    "fern", "ferry", "fiddle", "fig", "filter", "finch", "finger", "fir", "flame", "flask",
-    "flavor", "fleece", "flight", "flint", "flora", "flour", "flower", "fluent", "foam", "fog",
-    "foil", "forest", "forge", "fork", "format", "fortune", "fossil", "foster", "fox", "fragment",
-    "frame", "frost", "frozen", "fruit", "fuel", "fuji", "fungus", "galaxy", "gallery", "gambit",
-    "garden", "garlic", "garnet", "gather", "gauge", "gazelle", "gear", "gecko", "gem", "gentle",
-    "geyser", "ghost", "giant", "ginger", "giraffe", "glacier", "glade", "glass", "glide", "globe",
-    "glory", "glove", "glow", "glucose", "glyph", "gnome", "goat", "goblet", "godzilla", "golden",
-    "golf", "gondola", "gong", "gooey", "goose", "gopher", "gorilla", "gospel", "gossip", "gothic",
-    "gourd", "gourmet", "govern", "gown", "graffiti", "graft", "grain", "grant", "grape", "graph",
-    "grass", "gravity", "graze", "great", "greed", "green", "grid", "grief", "grill", "grimace",
+    "apple",
+    "arrow",
+    "aspen",
+    "atlas",
+    "bacon",
+    "badge",
+    "bagel",
+    "bamboo",
+    "banjo",
+    "barley",
+    "basin",
+    "basket",
+    "beacon",
+    "beaver",
+    "berry",
+    "birch",
+    "bishop",
+    "blanket",
+    "blaze",
+    "blend",
+    "breeze",
+    "brick",
+    "bridge",
+    "bronze",
+    "brook",
+    "bubble",
+    "bucket",
+    "butter",
+    "cabin",
+    "cable",
+    "cactus",
+    "candle",
+    "cannon",
+    "canvas",
+    "canyon",
+    "carpet",
+    "carrot",
+    "castle",
+    "cedar",
+    "chalk",
+    "charm",
+    "cherry",
+    "chest",
+    "cider",
+    "cinder",
+    "citrus",
+    "cliff",
+    "clover",
+    "coast",
+    "cobalt",
+    "coffee",
+    "comet",
+    "compass",
+    "copper",
+    "coral",
+    "corner",
+    "cosmos",
+    "cotton",
+    "couch",
+    "cougar",
+    "coyote",
+    "cradle",
+    "crane",
+    "crater",
+    "cricket",
+    "crystal",
+    "currant",
+    "curtain",
+    "dagger",
+    "daisy",
+    "dandelion",
+    "dawn",
+    "delta",
+    "desert",
+    "dew",
+    "diamond",
+    "diesel",
+    "dinner",
+    "dolphin",
+    "donkey",
+    "donut",
+    "dove",
+    "dragon",
+    "dream",
+    "drift",
+    "drum",
+    "dune",
+    "dusk",
+    "dusty",
+    "eagle",
+    "earth",
+    "echo",
+    "ecology",
+    "edge",
+    "elder",
+    "elm",
+    "ember",
+    "emerald",
+    "engine",
+    "envoy",
+    "epoch",
+    "equinox",
+    "estate",
+    "ether",
+    "evening",
+    "falcon",
+    "fable",
+    "fabric",
+    "factor",
+    "fennel",
+    "fern",
+    "ferry",
+    "fiddle",
+    "fig",
+    "filter",
+    "finch",
+    "finger",
+    "fir",
+    "flame",
+    "flask",
+    "flavor",
+    "fleece",
+    "flight",
+    "flint",
+    "flora",
+    "flour",
+    "flower",
+    "fluent",
+    "foam",
+    "fog",
+    "foil",
+    "forest",
+    "forge",
+    "fork",
+    "format",
+    "fortune",
+    "fossil",
+    "foster",
+    "fox",
+    "fragment",
+    "frame",
+    "frost",
+    "frozen",
+    "fruit",
+    "fuel",
+    "fuji",
+    "fungus",
+    "galaxy",
+    "gallery",
+    "gambit",
+    "garden",
+    "garlic",
+    "garnet",
+    "gather",
+    "gauge",
+    "gazelle",
+    "gear",
+    "gecko",
+    "gem",
+    "gentle",
+    "geyser",
+    "ghost",
+    "giant",
+    "ginger",
+    "giraffe",
+    "glacier",
+    "glade",
+    "glass",
+    "glide",
+    "globe",
+    "glory",
+    "glove",
+    "glow",
+    "glucose",
+    "glyph",
+    "gnome",
+    "goat",
+    "goblet",
+    "godzilla",
+    "golden",
+    "golf",
+    "gondola",
+    "gong",
+    "gooey",
+    "goose",
+    "gopher",
+    "gorilla",
+    "gospel",
+    "gossip",
+    "gothic",
+    "gourd",
+    "gourmet",
+    "govern",
+    "gown",
+    "graffiti",
+    "graft",
+    "grain",
+    "grant",
+    "grape",
+    "graph",
+    "grass",
+    "gravity",
+    "graze",
+    "great",
+    "greed",
+    "green",
+    "grid",
+    "grief",
+    "grill",
+    "grimace",
 ];
 
 pub fn generate_passphrase(word_count: usize, separator: &str) -> Result<String, String> {
@@ -145,23 +334,83 @@ pub fn passphrase_entropy_bits(word_count: usize) -> f64 {
     word_count as f64 * (WORDS.len() as f64).log2()
 }
 
+/// Machine-readable warning for a weak password. The UI localizes these;
+/// the core never returns user-facing sentences (ADR-0008).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum WarningCode {
+    Empty,
+    CommonPassword,
+    CommonWord { word: String },
+    Sequence,
+    RepeatedCharacters,
+    Year,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StrengthReport {
     pub entropy_bits: f64,
     /// 0 (very weak) ..= 4 (excellent).
     pub score: u8,
-    pub warnings: Vec<String>,
-    /// Rough offline-crack time at 10^10 guesses/second, humanized.
-    pub offline_crack_estimate: String,
+    pub warnings: Vec<WarningCode>,
+    /// Estimated offline crack time at 10^10 guesses/second. The UI formats
+    /// it for the active locale.
+    pub offline_crack_seconds: f64,
 }
 
 const COMMON_WORDS: &[&str] = &[
-    "password", "qwerty", "letmein", "admin", "welcome", "login", "master", "dragon", "football",
-    "monkey", "shadow", "superman", "michael", "ninja", "mustang", "charlie", "jordan", "taylor",
-    "computer", "michelle", "jessica", "pepper", "iloveyou", "princess", "secret", "summer",
-    "winter", "hello", "freedom", "whatever", "starwars", "trustno1", "pokemon", "naruto",
-    "sunshine", "ashley", "bailey", "passw0rd", "hunter", "buster", "soccer", "batman", "andrew",
-    "joshua", "daniel", "thomas", "george", "hannah", "purple", "orange", "banana", "monkey123",
+    "password",
+    "qwerty",
+    "letmein",
+    "admin",
+    "welcome",
+    "login",
+    "master",
+    "dragon",
+    "football",
+    "monkey",
+    "shadow",
+    "superman",
+    "michael",
+    "ninja",
+    "mustang",
+    "charlie",
+    "jordan",
+    "taylor",
+    "computer",
+    "michelle",
+    "jessica",
+    "pepper",
+    "iloveyou",
+    "princess",
+    "secret",
+    "summer",
+    "winter",
+    "hello",
+    "freedom",
+    "whatever",
+    "starwars",
+    "trustno1",
+    "pokemon",
+    "naruto",
+    "sunshine",
+    "ashley",
+    "bailey",
+    "passw0rd",
+    "hunter",
+    "buster",
+    "soccer",
+    "batman",
+    "andrew",
+    "joshua",
+    "daniel",
+    "thomas",
+    "george",
+    "hannah",
+    "purple",
+    "orange",
+    "banana",
+    "monkey123",
 ];
 
 fn leet_normalize(text: &str) -> String {
@@ -178,44 +427,15 @@ fn leet_normalize(text: &str) -> String {
         .collect()
 }
 
-fn humanize_seconds(seconds: f64) -> String {
-    if seconds < 1.0 {
-        return "瞬间".to_string();
-    }
-    if seconds < 60.0 {
-        return format!("{seconds:.0} 秒");
-    }
-    let minutes = seconds / 60.0;
-    if minutes < 60.0 {
-        return format!("{minutes:.0} 分钟");
-    }
-    let hours = minutes / 60.0;
-    if hours < 24.0 {
-        return format!("{hours:.0} 小时");
-    }
-    let days = hours / 24.0;
-    if days < 365.0 {
-        return format!("{days:.0} 天");
-    }
-    let years = days / 365.0;
-    if years < 1e6 {
-        return format!("{years:.0} 年");
-    }
-    if years < 1e9 {
-        return format!("{:.0} 百万年", years / 1e6);
-    }
-    "宇宙年龄级别".to_string()
-}
-
 pub fn password_strength(password: &str) -> StrengthReport {
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<WarningCode> = Vec::new();
     let chars: Vec<char> = password.chars().collect();
     if chars.is_empty() {
         return StrengthReport {
             entropy_bits: 0.0,
             score: 0,
-            warnings: vec!["密码为空".to_string()],
-            offline_crack_estimate: "瞬间".to_string(),
+            warnings: vec![WarningCode::Empty],
+            offline_crack_seconds: 0.0,
         };
     }
     let mut pool: usize = 0;
@@ -242,12 +462,14 @@ pub fn password_strength(password: &str) -> StrengthReport {
     for word in COMMON_WORDS {
         if normalized == *word {
             bits = bits.min(8.0);
-            warnings.push("这是最常见的密码之一".to_string());
+            warnings.push(WarningCode::CommonPassword);
             break;
         }
         if normalized.contains(word) {
             bits -= 14.0;
-            warnings.push(format!("包含常见词「{word}」"));
+            warnings.push(WarningCode::CommonWord {
+                word: word.to_string(),
+            });
             break;
         }
     }
@@ -272,7 +494,7 @@ pub fn password_strength(password: &str) -> StrengthReport {
     }
     if sequences > 0 {
         bits -= 8.0 * sequences as f64;
-        warnings.push("包含连续序列（如 abcd / 1234）".to_string());
+        warnings.push(WarningCode::Sequence);
     }
 
     // Repeat penalty: same char 3+ times in a row.
@@ -290,7 +512,7 @@ pub fn password_strength(password: &str) -> StrengthReport {
     }
     if has_repeat {
         bits -= 6.0;
-        warnings.push("包含重复字符（如 aaa）".to_string());
+        warnings.push(WarningCode::RepeatedCharacters);
     }
 
     // Year penalty.
@@ -300,7 +522,7 @@ pub fn password_strength(password: &str) -> StrengthReport {
         if let Ok(y) = year.parse::<u32>() {
             if (1950..=2030).contains(&y) {
                 bits -= 6.0;
-                warnings.push("包含年份".to_string());
+                warnings.push(WarningCode::Year);
                 break;
             }
         }
@@ -323,7 +545,7 @@ pub fn password_strength(password: &str) -> StrengthReport {
         entropy_bits: bits,
         score,
         warnings,
-        offline_crack_estimate: humanize_seconds(guesses / 1e10),
+        offline_crack_seconds: guesses / 1e10,
     }
 }
 
@@ -333,7 +555,11 @@ mod tests {
 
     #[test]
     fn generator_respects_options() {
-        let opts = GeneratorOptions { length: 24, symbols: false, ..GeneratorOptions::default() };
+        let opts = GeneratorOptions {
+            length: 24,
+            symbols: false,
+            ..GeneratorOptions::default()
+        };
         let pw = generate_password(&opts).unwrap();
         assert_eq!(pw.chars().count(), 24);
         assert!(pw.chars().any(|c| c.is_ascii_lowercase()));
@@ -385,10 +611,16 @@ mod tests {
         assert_eq!(password_strength("password").score, 0);
         assert_eq!(password_strength("P@ssw0rd").score, 0); // leet dictionary hit
         let seq = password_strength("abcd1234XYZ!");
-        assert!(seq.warnings.iter().any(|w| w.contains("序列")));
+        assert!(seq
+            .warnings
+            .iter()
+            .any(|w| matches!(w, WarningCode::Sequence)));
         let strong = generate_password(&GeneratorOptions::default()).unwrap();
         let report = password_strength(&strong);
-        assert!(report.score >= 3, "generated default should be strong: {report:?}");
+        assert!(
+            report.score >= 3,
+            "generated default should be strong: {report:?}"
+        );
         assert!(report.entropy_bits > 90.0);
         let weak = password_strength("abc");
         assert!(weak.entropy_bits < report.entropy_bits);
