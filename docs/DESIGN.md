@@ -1,5 +1,15 @@
 # yobei 设计稿 v0（持续修订）
 
+> ⚠️ **本稿是 v0 草稿，以下部分已被 `docs/adr/` 中的正式决策取代，冲突时以 ADR 为准：**
+>
+> - 条目类型：七种 → 四种（[ADR-0004](adr/0004-entry-model.md)）
+> - Secret Key：可选 → 强制开启（[ADR-0001](adr/0001-master-key-hierarchy-and-recovery-kit.md)）
+> - 新设备加入：复制库文件 / 开放注册 → 引导包 + 恢复套件（[ADR-0002](adr/0002-vault-bootstrap-and-device-enrollment.md)）
+> - 同步删除：清空密文 → 删除终态 + 30 天窗口（[ADR-0003](adr/0003-sync-integrity-and-deletion.md)）
+> - 秘密归属与自动保存：未定义 → [ADR-0005](adr/0005-secret-attribution-and-autosave.md)
+> - 平台解锁：未定义 → [ADR-0006](adr/0006-platform-unlock-ladder.md)
+> - 国际化：用户可见文字只属于展示层 → [ADR-0008](adr/0008-internationalization.md)
+
 标识符：`com.sukirya.yobei` · 客户端：Tauri 2 + Svelte 5 + TypeScript（Bun）· 核心：Rust · 同步：Cloudflare Workers
 
 本稿落实的已定决策（2026-10-25，用户拍板）：
@@ -90,6 +100,10 @@
 
 ## 4. 同步协议（Cloudflare Workers）
 
+> ⚠️ 本节的字段与接口草案已被 [ADR-0002](adr/0002-vault-bootstrap-and-device-enrollment.md)
+> （同步地址、引导包、设备鉴权）与 [ADR-0003](adr/0003-sync-integrity-and-deletion.md)
+> （统一 put 操作、删除终态）取代；下面保留为背景。
+
 ### 4.1 部署模型：用用户自己的免费额度
 
 - 提供一键部署（Wrangler / Deploy Button），用户把同步 Worker 部署到**自己的 Cloudflare 账号**：
@@ -104,24 +118,27 @@
 ### 4.2 同步语义（哑服务端）
 
 - 服务端只存：账号/设备注册信息、记录密文（D1 行内 BLOB）、每条记录的版本号与 HLC、op 日志。**不见明文、不做合并**。
-- 客户端本地 outbox：所有变更先落本地并生成操作 `{ op_id (UUID), vault_id, record_id, base_version, hlc, type: upsert|delete, ciphertext, nonce }`。
+- 客户端本地 outbox：所有变更先落本地并生成操作
+  `{ op_id, vault_id（同步地址）, entry_id, base_version, new_version, hlc, deleted, deleted_at_ms, ciphertext }`。
+  删除是条目状态（`deleted = true`），不是单独的 op 类型。
 - 推送：批量提交 ops → 服务端按 `op_id` 去重（幂等，重试安全）→ 版本校验：
   `base_version` 与服务端当前版本一致才接受；不一致返回冲突，客户端把远端版本存为**冲突副本**，不覆盖本地。
-- 拉取：按清单（record_id → version/hlc/更新时间）增量对比，只拉变化的记录密文。
+- 拉取：按清单（entry_id → version/hlc/更新时间）增量对比，只拉变化的条目密文。
 - 删除：墓碑 op 同步，保留期过后才允许物理清除（防离线设备复活已删记录）。
 - 冲突呈现：UI 层（占位 UI 先做列表呈现）让用户二选一或手动合并；核心只负责检测与保留双方版本。
 
 ### 4.3 接口草案（v1，前缀 /v1）
 
 - `GET  /v1/health` — 存活检查（无鉴权）
-- `POST /v1/devices` — 注册设备（返回设备令牌；令牌只用于同步鉴权，与解密无关）
-- `GET  /v1/vaults/:vaultId/manifest` — 拉清单
-- `PUT  /v1/vaults/:vaultId/records/:recordId` — 上传单条密文（带 version/hlc/op_id 头，幂等）
-- `GET  /v1/vaults/:vaultId/records/:recordId` — 下载单条密文
-- `POST /v1/vaults/:vaultId/ops` — 批量提交 ops（去重 + 版本校验，返回逐条 accepted/conflict）
+- `GET  /v1/vaults/:address/bootstrap` — 取回加密引导包（公开）
+- `PUT  /v1/vaults/:address/bootstrap` — 上传/更新引导包（首次 TOFU，之后需 auth key）
+- `POST /v1/vaults/:address/devices` — 用 auth key 注册设备，返回一次性展示的设备令牌
+- `GET  /v1/vaults/:address/manifest` — 拉清单
+- `GET  /v1/vaults/:address/entries/:entryId` — 下载单条密文
+- `POST /v1/vaults/:address/ops` — 批量提交 ops（去重 + 版本校验，返回逐条 accepted/conflict）
 
-鉴权：设备令牌（Bearer）+ 请求签名为后续 ADR 预留；令牌泄露最坏后果是密文被下载，
-解密仍需要主密码（+ Secret Key），这是 E2EE 的兜底。
+鉴权分两层：auth key（由 Vault Key 派生）只用于引导包与设备注册；设备令牌用于日常同步，
+可在服务端单独撤销，撤销只停止同步，不删除设备本地数据。
 
 ## 5. 仓库结构（与本稿同步落地）
 

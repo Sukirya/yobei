@@ -7,9 +7,10 @@
 - 核心：独立的 Rust crate `crates/yobei-core`（六边形架构，不依赖任何平台框架）
 - 同步：Cloudflare Workers 服务端 `workers/sync`，部署在用户自己的
   Cloudflare 账号上，端到端加密，服务端只存密文
-- 记录模型是统一的：一张账号记录内聚密码 + TOTP + passkey + 恢复代码
+- 条目模型统一：账号（密码 + TOTP + passkey + 恢复代码）、银行卡、身份、安全笔记
 
-设计与决策见 [`docs/DESIGN.md`](docs/DESIGN.md)。
+设计与决策见 [`docs/adr/`](docs/adr/README.md)（正式决策）与 [`docs/DESIGN.md`](docs/DESIGN.md)（v0 草案）。
+开发规则见 [`AGENTS.md`](AGENTS.md)。
 
 ## 本地开发
 
@@ -26,5 +27,14 @@ Rust 核心单独验证（不需要 Tauri 环境）：
 ```bash
 cargo test --manifest-path crates/yobei-core/Cargo.toml
 ```
+
+全量检查（格式、clippy、测试、前端类型、Worker 类型）：
+
+```bash
+bash scripts/check.sh
+```
+
+> Windows + Git Bash 注意：`/usr/bin/link` 会遮蔽 MSVC 的 `link.exe`，导致 rustc 链接失败。
+> 请使用 PowerShell / VS 开发者命令行，或把 MSVC 的 bin 目录放在 PATH 前面。
 
 同步服务端见 `workers/sync/README.md`。

@@ -35,6 +35,12 @@ jobs:
           workspaces: |
             crates/yobei-core -> target
 
+      - name: Check formatting
+        run: cargo fmt --manifest-path crates/yobei-core/Cargo.toml -- --check
+
+      - name: Clippy
+        run: cargo clippy --manifest-path crates/yobei-core/Cargo.toml --all-targets -- -D warnings
+
       - name: Run core tests
         # No root workspace manifest by design (Tauri layout); point
         # cargo at the crate directly.
@@ -64,8 +70,28 @@ jobs:
           bun install
           bun run build
 
-      - name: Type-check the Tauri shell on Windows
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+      - name: Check formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Clippy the Tauri shell
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Frontend type check
+        run: bun run check
+
+  worker-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: cd workers/sync && bun install --frozen-lockfile
+
+      - name: Type-check the sync worker
+        run: cd workers/sync && bun run typecheck
 
   build-android:
     runs-on: ubuntu-latest
