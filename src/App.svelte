@@ -102,6 +102,56 @@
   let error = $state("");
   let busy = $state(false);
 
+  // biometric unlock (ADR-0009)
+  interface BiometricStatus {
+    state: string;
+    enrolled: boolean;
+  }
+  let biometric = $state<BiometricStatus | null>(null);
+
+  async function refreshBiometric() {
+    const b = await run(() => invoke<BiometricStatus>("biometric_status"));
+    if (b) biometric = b;
+  }
+
+  async function unlockBiometric() {
+    const res = await run(() =>
+      invoke<string>("biometric_unlock", {
+        title: t("biometric.unlock.title"),
+        subtitle: t("biometric.unlock.subtitle"),
+      }),
+    );
+    if (res) {
+      password = "";
+      secretKeyInput = "";
+      await refreshStatus();
+      return;
+    }
+    if (error === "biometric_cancelled") {
+      error = ""; // the user backed out; stay on the password form.
+    } else if (error === "biometric_key_invalidated") {
+      error = t("biometric.invalidated");
+    } else if (error === "biometric_locked_out") {
+      error = t("biometric.lockedOut");
+    }
+    await refreshBiometric();
+  }
+
+  async function enableBiometric() {
+    await run(() =>
+      invoke("biometric_enable", {
+        title: t("biometric.enroll.title"),
+        subtitle: t("biometric.enroll.subtitle"),
+      }),
+    );
+    if (!error) await refreshBiometric();
+  }
+
+  async function disableBiometric() {
+    await run(() => invoke("biometric_disable"));
+    if (!error) await refreshBiometric();
+  }
+
   // create / unlock forms
   let password = $state("");
   let password2 = $state("");
@@ -148,6 +198,7 @@
         await refreshSyncStatus();
       }
     }
+    await refreshBiometric();
   }
 
   async function refreshEntries() {
@@ -742,6 +793,11 @@
   {:else if !status.unlocked}
     <section>
       <h2>{t("vault.unlock.title")}</h2>
+      {#if biometric?.state === "available" && biometric.enrolled}
+        <button disabled={busy} onclick={unlockBiometric}>
+          {t("biometric.unlock.button")}
+        </button>
+      {/if}
       <input
         type="password"
         placeholder={t("vault.unlock.password")}
@@ -760,6 +816,13 @@
     <section>
       <div class="row">
         <span>{t("vault.info", { id: status.vault_id?.slice(0, 8) ?? "" })}</span>
+        {#if biometric?.state === "available"}
+          {#if biometric.enrolled}
+            <button onclick={disableBiometric}>{t("biometric.disable")}</button>
+          {:else}
+            <button onclick={enableBiometric}>{t("biometric.enable")}</button>
+          {/if}
+        {/if}
         <button onclick={() => (showChangePw = !showChangePw)}>
           {t("vault.changePassword")}
         </button>

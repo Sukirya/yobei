@@ -1,0 +1,18 @@
+[package]
+name = "tauri-plugin-yobei-biometric"
+version = "0.1.0"
+description = "Biometric unlock for yobei: the vault key wrapped by an Android Keystore key, gated by BiometricPrompt (ADR-0009)."
+authors = ["Sukirya"]
+license = "GPL-3.0-or-later"
+edition = "2024"
+build = "build.rs"
+links = "tauri-plugin-yobei-biometric"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2" }
+thiserror = "2"

@@ -4044,6 +4044,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-yobei-biometric"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "tauri-runtime"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5286,6 +5297,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "tauri-plugin-yobei-biometric",
  "ureq",
  "yobei-core",
 ]

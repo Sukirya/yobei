@@ -11,6 +11,12 @@ vite.config.ts.timestamp-*
 # Rust build output
 target/
 
+# The biometric plugin is a library crate: its own lockfile is redundant
+# (src-tauri/Cargo.lock pins its dependencies), and its android/.tauri
+# sources are generated at build time by the plugin build script.
+crates/tauri-plugin-yobei-biometric/Cargo.lock
+crates/tauri-plugin-yobei-biometric/android/.tauri/
+
 # Generated mobile projects (recreated by `bun run tauri android init`)
 
 # Wrangler local state

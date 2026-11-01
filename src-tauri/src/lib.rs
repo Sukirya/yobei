@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use data_encoding::BASE64;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_yobei_biometric::BiometricExt;
 use yobei_core::crypto::CryptoProfile;
 use yobei_core::entry::{Entry, EntryKind, EntryPayload};
 use yobei_core::secretkey;
@@ -244,6 +245,121 @@ fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         .map_err(|_| "app state poisoned".to_string())?;
     *guard = None; // dropping the Service drops (and zeroizes) the vault key
     Ok(())
+}
+
+// ------------------------------------------------------- biometric unlock ---
+
+/// Biometric unlock state (ADR-0009). `state` is "available" |
+/// "no_hardware" | "not_enrolled" | "no_device_credential" | "unavailable"
+/// | "unsupported" (non-Android); `enrolled` says whether this device
+/// already holds a wrapped vault key.
+#[derive(Serialize)]
+struct BiometricStatus {
+    state: String,
+    enrolled: bool,
+}
+
+#[tauri::command]
+async fn biometric_status(app: AppHandle) -> Result<BiometricStatus, String> {
+    match app.biometric().status().await {
+        Ok(s) => Ok(BiometricStatus {
+            state: s.state,
+            enrolled: s.enrolled,
+        }),
+        Err(tauri_plugin_yobei_biometric::Error::UnsupportedPlatform) => Ok(BiometricStatus {
+            state: "unsupported".to_string(),
+            enrolled: false,
+        }),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Enroll this device for biometric unlock. Requires the vault to be
+/// unlocked; takes the vault key out of memory (never the password or the
+/// Secret Key) and hands it to the platform adapter, which wraps it under
+/// the device keystore key after one biometric authentication.
+#[tauri::command]
+async fn biometric_enable(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    title: String,
+    subtitle: String,
+) -> Result<(), String> {
+    let (vault_key, key_check) = {
+        let mut guard = state
+            .service
+            .lock()
+            .map_err(|_| "app state poisoned".to_string())?;
+        let service = guard
+            .as_mut()
+            .ok_or_else(|| "vault is locked".to_string())?;
+        let vault = service.vault_mut();
+        let key = *vault.vault_key();
+        let check = Vault::vault_key_check(&key)?;
+        (key, check)
+    };
+    let vault_key_b64 = BASE64.encode(&vault_key);
+    let key_check_b64 = BASE64.encode(&key_check);
+    app.biometric()
+        .enroll(&vault_key_b64, &key_check_b64, &title, &subtitle)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Unlock with the device keystore key after one biometric authentication.
+/// The vault key travels only between the platform adapter and core; it
+/// never enters the webview.
+#[tauri::command]
+async fn biometric_unlock(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    title: String,
+    subtitle: String,
+) -> Result<String, String> {
+    let path = vault_path(&app)?;
+    Vault::peek_header(&path).ok_or_else(|| "no vault found".to_string())?;
+    let resp = app
+        .biometric()
+        .unlock(&title, &subtitle)
+        .await
+        .map_err(|e| e.to_string())?;
+    let vault_key = BASE64
+        .decode(resp.vault_key_b64.as_bytes())
+        .map_err(|_| "bad biometric key".to_string())?;
+    let key_check = BASE64
+        .decode(resp.key_check_b64.as_bytes())
+        .map_err(|_| "bad biometric key".to_string())?;
+    let vault_key: [u8; 32] = vault_key
+        .try_into()
+        .map_err(|_| "bad biometric key".to_string())?;
+    let key_check: [u8; 32] = key_check
+        .try_into()
+        .map_err(|_| "bad biometric key".to_string())?;
+    let vault = match Vault::open_with_key(&path, &vault_key, &key_check) {
+        Ok(v) => v,
+        Err(e) if e == "biometric key does not match this vault" => {
+            // Stale blob (the vault was recreated after enrollment): drop
+            // it so the user can re-enable, and fall back to the password.
+            let _ = app.biometric().remove().await;
+            return Err("biometric_key_invalidated".to_string());
+        }
+        Err(e) => return Err(e),
+    };
+    let service = Service::new(vault);
+    let vault_id = service.vault_id().to_string();
+    let mut guard = state
+        .service
+        .lock()
+        .map_err(|_| "app state poisoned".to_string())?;
+    *guard = Some(service);
+    Ok(vault_id)
+}
+
+/// Forget the wrapped vault key on this device (and its keystore key).
+/// The vault itself is untouched; unlocking falls back to the password.
+#[tauri::command]
+async fn biometric_disable(app: AppHandle) -> Result<(), String> {
+    app.biometric().remove().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -705,6 +821,7 @@ fn sync_now(state: State<'_, AppState>) -> Result<yobei_core::syncengine::SyncRe
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_yobei_biometric::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             vault_status,
@@ -712,6 +829,10 @@ pub fn run() {
             unlock_vault,
             join_vault,
             lock_vault,
+            biometric_status,
+            biometric_enable,
+            biometric_unlock,
+            biometric_disable,
             change_master_password,
             create_entry,
             save_entry,

@@ -13,6 +13,12 @@ cargo clippy --manifest-path crates/yobei-core/Cargo.toml --all-targets -- -D wa
 echo "==> core: tests"
 cargo test --manifest-path crates/yobei-core/Cargo.toml
 
+echo "==> biometric plugin: format"
+cargo fmt --manifest-path crates/tauri-plugin-yobei-biometric/Cargo.toml -- --check
+
+echo "==> biometric plugin: clippy"
+cargo clippy --manifest-path crates/tauri-plugin-yobei-biometric/Cargo.toml --all-targets -- -D warnings
+
 echo "==> app shell: format"
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 

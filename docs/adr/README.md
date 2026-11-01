@@ -23,5 +23,6 @@
 | [0006](0006-platform-unlock-ladder.md) | 平台解锁能力阶梯 | 已采纳 | — |
 | [0007](0007-engineering-guardrails.md) | 工程护栏：规格、ADR 与 CI 门禁 | 已采纳 | — |
 | [0008](0008-internationalization.md) | 国际化：用户可见文字只属于展示层 | 已采纳 | — |
+| [0009](0009-biometric-device-key.md) | 生物识别解锁的设备密钥实现 | 已采纳 | — |
 
 > 本目录中的决策优先于 `docs/DESIGN.md` 的 v0 草稿。冲突时以 ADR 为准。

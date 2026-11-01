@@ -36,6 +36,18 @@ const en = {
   "vault.changePassword": "Change master password",
   "vault.lock": "Lock",
 
+  "biometric.unlock.button": "Unlock with biometrics",
+  "biometric.unlock.title": "Unlock Yobei",
+  "biometric.unlock.subtitle": "Use your fingerprint, face, or lock screen credential",
+  "biometric.enroll.title": "Enable biometric unlock",
+  "biometric.enroll.subtitle": "Verify once; afterwards you can unlock with biometrics",
+  "biometric.enable": "Enable biometrics",
+  "biometric.disable": "Disable biometrics",
+  "biometric.invalidated":
+    "Biometric unlock stopped working (for example, a new fingerprint was added). Unlock with your master password and Secret Key, then enable it again.",
+  "biometric.lockedOut":
+    "Too many failed attempts; biometrics are locked for a while. Use your master password and Secret Key.",
+
   "join.title": "Join an existing vault",
   "join.hint": "Use the sync address and Secret Key from your recovery kit.",
   "join.serverUrl": "Sync server URL",
@@ -200,6 +212,18 @@ const zhCN: Record<MessageKey, string> = {
   "vault.info": "保险库 {id}…",
   "vault.changePassword": "修改主密码",
   "vault.lock": "锁定",
+
+  "biometric.unlock.button": "使用生物识别解锁",
+  "biometric.unlock.title": "解锁 Yobei",
+  "biometric.unlock.subtitle": "使用指纹、面容或锁屏凭据解锁",
+  "biometric.enroll.title": "启用生物识别解锁",
+  "biometric.enroll.subtitle": "验证一次，之后即可用生物识别解锁",
+  "biometric.enable": "启用生物识别",
+  "biometric.disable": "停用生物识别",
+  "biometric.invalidated":
+    "生物识别解锁已失效（例如新增了指纹）。请用主密码和 Secret Key 解锁，然后重新启用。",
+  "biometric.lockedOut":
+    "尝试次数过多，生物识别已暂时锁定。请用主密码和 Secret Key 解锁。",
 
   "join.title": "加入已有保险库",
   "join.hint": "使用恢复套件里的同步地址和 Secret Key。",

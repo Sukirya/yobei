@@ -154,6 +154,22 @@ impl Vault {
         self.header.bootstrap_package.as_deref()
     }
 
+    /// The raw vault key. Only the platform unlock adapter (ADR-0009) may
+    /// take it out, to store it under the device keystore; it never leaves
+    /// the app process and never enters the webview.
+    pub fn vault_key(&self) -> &[u8; KEY_LEN] {
+        &self.vault_key
+    }
+
+    /// Fingerprint of a vault key: SHA-256 of the auth key (ADR-0002), the
+    /// same value the sync server stores. A platform adapter records it
+    /// next to a stored vault key so `open_with_key` can tell a stale key
+    /// from the right one. It is one-way: it cannot recover the vault key.
+    pub fn vault_key_check(vault_key: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN], String> {
+        let auth = crate::bootstrap::derive_auth_key(vault_key)?;
+        Ok(crate::bootstrap::auth_key_hash(&auth))
+    }
+
     /// Base64 of the auth key: the enrollment credential sent to the sync
     /// server. Never log it.
     pub fn auth_key_b64(&self) -> Result<String, String> {
@@ -227,15 +243,15 @@ impl Vault {
         })
     }
 
-    /// Open an existing vault. A wrong password (or wrong/missing secret
-    /// key) fails at unwrapping the vault key, before any entry is read.
-    pub fn open(path: &Path, password: &str, secret_key: Option<&[u8]>) -> Result<Vault, String> {
+    /// Open the SQLite file and read + validate the header, without
+    /// authenticating. Shared by `open` and `open_with_key`.
+    fn open_db(path: &Path) -> Result<(Connection, VaultHeader), String> {
         // Connection::open creates a zero-byte file when the path does not
         // exist; never open a missing vault, or the next create is blocked.
         if !path.exists() {
             return Err("no vault found".to_string());
         }
-        let mut conn = Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
+        let conn = Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
         conn.execute_batch("PRAGMA secure_delete = ON;")
             .map_err(|e| format!("configure vault db: {e}"))?;
         let header_json: String = conn
@@ -247,7 +263,6 @@ impl Vault {
             .map_err(|_| "not a yobei vault (missing header)".to_string())?;
         let header: VaultHeader =
             serde_json::from_str(&header_json).map_err(|e| format!("corrupt vault header: {e}"))?;
-        let mut header = header;
         if header.format_version != VAULT_FORMAT_VERSION {
             return Err(format!(
                 "unsupported vault format version {}",
@@ -255,6 +270,28 @@ impl Vault {
             ));
         }
         crate::bootstrap::validate_kdf_params(&header.profile.kdf_params)?;
+        Ok((conn, header))
+    }
+
+    /// Vaults created before the sync tables existed gain them here.
+    fn ensure_sync_schema(conn: &Connection) -> Result<(), String> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS outbox (
+                 op_id TEXT PRIMARY KEY,
+                 entry_id TEXT NOT NULL,
+                 op_json TEXT NOT NULL,
+                 created_at_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )
+        .map_err(|e| format!("ensure sync schema: {e}"))?;
+        Ok(())
+    }
+
+    /// Open an existing vault. A wrong password (or wrong/missing secret
+    /// key) fails at unwrapping the vault key, before any entry is read.
+    pub fn open(path: &Path, password: &str, secret_key: Option<&[u8]>) -> Result<Vault, String> {
+        let (mut conn, mut header) = Self::open_db(path)?;
         // The Secret Key is mandatory (ADR-0001).
         let secret_key = secret_key.ok_or_else(|| "a Secret Key is required".to_string())?;
         let kek = keys::derive_kek(
@@ -277,21 +314,39 @@ impl Vault {
             header.bootstrap_package = Some(package);
             Self::store_header(&mut conn, &header)?;
         }
-        // Vaults created before the sync tables existed gain them here.
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS outbox (
-                 op_id TEXT PRIMARY KEY,
-                 entry_id TEXT NOT NULL,
-                 op_json TEXT NOT NULL,
-                 created_at_ms INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-        )
-        .map_err(|e| format!("ensure sync schema: {e}"))?;
+        Self::ensure_sync_schema(&conn)?;
         Ok(Vault {
             conn,
             header,
             vault_key,
+        })
+    }
+
+    /// Open an existing vault with a previously derived vault key, e.g. the
+    /// one a platform adapter (biometric unlock, ADR-0009) recovered from
+    /// the device keystore. Skips the password KDF entirely.
+    ///
+    /// `key_check` is the fingerprint from `vault_key_check`, recorded when
+    /// the key was stored; it proves the key belongs to *this* vault, so a
+    /// stale blob (vault recreated after the blob was written) fails loudly
+    /// here instead of opening the vault under the wrong key. The sync
+    /// address / bootstrap package are left untouched: they were written at
+    /// creation and only repaired on a password unlock, which has the
+    /// Secret Key.
+    pub fn open_with_key(
+        path: &Path,
+        vault_key: &[u8; KEY_LEN],
+        key_check: &[u8; KEY_LEN],
+    ) -> Result<Vault, String> {
+        if Self::vault_key_check(vault_key)? != *key_check {
+            return Err("biometric key does not match this vault".to_string());
+        }
+        let (conn, header) = Self::open_db(path)?;
+        Self::ensure_sync_schema(&conn)?;
+        Ok(Vault {
+            conn,
+            header,
+            vault_key: Zeroizing::new(*vault_key),
         })
     }
 
@@ -876,6 +931,70 @@ mod tests {
         // Secret Key must also fail.
         let wrong_sk = keys::random_bytes(KEY_LEN);
         assert!(Vault::open(&path, "right", Some(&wrong_sk)).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_with_key_roundtrip() {
+        let path = temp_vault_path("open-with-key");
+        let sk = keys::random_bytes(KEY_LEN);
+        let mut vault = Vault::create(&path, "pw-1", Some(&sk), test_profile(), 1_000).unwrap();
+        let entry = Entry::new_account(
+            Vault::new_id(),
+            vault.vault_id().to_string(),
+            "GitHub".into(),
+            1_000,
+        );
+        let entry_id = entry.id.clone();
+        vault.put(&entry).unwrap();
+        let key = *vault.vault_key();
+        let check = Vault::vault_key_check(&key).unwrap();
+        let vault_id = vault.vault_id().to_string();
+        drop(vault);
+
+        let reopened = Vault::open_with_key(&path, &key, &check).unwrap();
+        assert_eq!(reopened.vault_id(), vault_id);
+        assert!(reopened.get_entry(&entry_id).unwrap().is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_with_key_rejects_a_stale_key() {
+        // A blob recorded for another vault (or a recreated one) must fail
+        // here, not open this vault under the wrong key.
+        let path = temp_vault_path("stale-key");
+        let sk = keys::random_bytes(KEY_LEN);
+        let vault = Vault::create(&path, "pw", Some(&sk), test_profile(), 0).unwrap();
+        let check = Vault::vault_key_check(vault.vault_key()).unwrap();
+        drop(vault);
+
+        let other_key: [u8; KEY_LEN] = keys::random_bytes(KEY_LEN).try_into().unwrap();
+        assert!(Vault::open_with_key(&path, &other_key, &check).is_err());
+
+        // ...and a tampered check fails even with the right key.
+        let vault = Vault::open(&path, "pw", Some(&sk)).unwrap();
+        let key = *vault.vault_key();
+        drop(vault);
+        let mut bad_check = check;
+        bad_check[0] ^= 1;
+        assert!(Vault::open_with_key(&path, &key, &bad_check).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_with_key_survives_a_password_change() {
+        // The vault key is stable across password changes (ADR-0001): a
+        // biometric blob recorded before the change still opens the vault.
+        let path = temp_vault_path("key-stable");
+        let sk = keys::random_bytes(KEY_LEN);
+        let mut vault = Vault::create(&path, "old-pw", Some(&sk), test_profile(), 0).unwrap();
+        let key = *vault.vault_key();
+        let check = Vault::vault_key_check(&key).unwrap();
+        vault
+            .change_password("old-pw", "new-pw", Some(&sk))
+            .unwrap();
+        drop(vault);
+        assert!(Vault::open_with_key(&path, &key, &check).is_ok());
         let _ = std::fs::remove_file(&path);
     }
 
