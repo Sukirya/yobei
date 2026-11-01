@@ -24,5 +24,6 @@
 | [0007](0007-engineering-guardrails.md) | 工程护栏：规格、ADR 与 CI 门禁 | 已采纳 | — |
 | [0008](0008-internationalization.md) | 国际化：用户可见文字只属于展示层 | 已采纳 | — |
 | [0009](0009-biometric-device-key.md) | 生物识别解锁的设备密钥实现 | 已采纳 | — |
+| [0010](0010-password-only-unlock.md) | 日常解锁只用主密码 | 已采纳 | ADR-0001 的“解锁强制 Secret Key”（仅解锁路径） |
 
 > 本目录中的决策优先于 `docs/DESIGN.md` 的 v0 草稿。冲突时以 ADR 为准。

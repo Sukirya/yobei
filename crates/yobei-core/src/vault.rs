@@ -73,6 +73,12 @@ pub struct VaultHeader {
     pub kdf_salt: Vec<u8>,
     /// Vault key wrapped under the KEK (see keys.rs).
     pub wrapped_vault_key: Vec<u8>,
+    /// Vault key wrapped under the password-only KEK (Argon2id output,
+    /// no Secret Key) so daily unlock needs only the master password
+    /// (ADR-0010). Absent on vaults created before this existed; `open`
+    /// writes it on the first unlock with the Secret Key.
+    #[serde(default)]
+    pub wrapped_vault_key_password_only: Option<Vec<u8>>,
     pub created_at_ms: i64,
     /// Sync address derived from the Secret Key (ADR-0002). Safe to publish;
     /// only holders of the Secret Key can compute it.
@@ -212,6 +218,10 @@ impl Vault {
                 .try_into()
                 .expect("random_bytes returns the requested length");
             let wrapped = keys::wrap_key(&kek, &vault_key_bytes)?;
+            // Second wrapping under the password-only KEK (ADR-0010), so
+            // daily unlock needs only the master password.
+            let pw_kek = keys::derive_kek(password, &salt, profile.kdf_params, None)?;
+            let wrapped_pw = keys::wrap_key(&pw_kek, &vault_key_bytes)?;
             let sync_address = crate::bootstrap::vault_address(secret_key)?;
             let mut header = VaultHeader {
                 format_version: VAULT_FORMAT_VERSION,
@@ -219,6 +229,7 @@ impl Vault {
                 profile,
                 kdf_salt: salt,
                 wrapped_vault_key: wrapped,
+                wrapped_vault_key_password_only: Some(wrapped_pw),
                 created_at_ms: now_ms,
                 sync_address: Some(sync_address),
                 bootstrap_package: None,
@@ -290,28 +301,69 @@ impl Vault {
 
     /// Open an existing vault. A wrong password (or wrong/missing secret
     /// key) fails at unwrapping the vault key, before any entry is read.
+    ///
+    /// With a Secret Key this is the original path (ADR-0001), and it also
+    /// migrates the vault: if the password-only wrapping (ADR-0010) is
+    /// missing, it is written so the next unlock needs only the password.
+    /// Without a Secret Key, only the password-only wrapping is tried;
+    /// vaults created before ADR-0010 need one unlock with the Secret Key
+    /// first.
     pub fn open(path: &Path, password: &str, secret_key: Option<&[u8]>) -> Result<Vault, String> {
         let (mut conn, mut header) = Self::open_db(path)?;
-        // The Secret Key is mandatory (ADR-0001).
-        let secret_key = secret_key.ok_or_else(|| "a Secret Key is required".to_string())?;
-        let kek = keys::derive_kek(
-            password,
-            &header.kdf_salt,
-            header.profile.kdf_params,
-            Some(secret_key),
-        )?;
-        let vault_key = keys::unwrap_key(&kek, &header.wrapped_vault_key)
-            .map_err(|_| "wrong password or secret key".to_string())?;
-        // Derive the sync address and (re)seal the bootstrap package. The
-        // Secret Key is available here, so a package missing from an older
-        // header is repaired in place (ADR-0002).
-        let expected_address = crate::bootstrap::vault_address(secret_key)?;
-        if header.sync_address.as_deref() != Some(expected_address.as_str())
-            || header.bootstrap_package.is_none()
-        {
-            header.sync_address = Some(expected_address);
-            let package = Self::seal_package(&header, secret_key)?;
-            header.bootstrap_package = Some(package);
+        let mut dirty = false;
+        let vault_key = match secret_key {
+            Some(secret_key) => {
+                let kek = keys::derive_kek(
+                    password,
+                    &header.kdf_salt,
+                    header.profile.kdf_params,
+                    Some(secret_key),
+                )?;
+                let vault_key = keys::unwrap_key(&kek, &header.wrapped_vault_key)
+                    .map_err(|_| "wrong password or secret key".to_string())?;
+                // Derive the sync address and (re)seal the bootstrap
+                // package. The Secret Key is available here, so a package
+                // missing from an older header is repaired in place
+                // (ADR-0002).
+                let expected_address = crate::bootstrap::vault_address(secret_key)?;
+                if header.sync_address.as_deref() != Some(expected_address.as_str())
+                    || header.bootstrap_package.is_none()
+                {
+                    header.sync_address = Some(expected_address);
+                    let package = Self::seal_package(&header, secret_key)?;
+                    header.bootstrap_package = Some(package);
+                    dirty = true;
+                }
+                // Migration (ADR-0010): write the password-only wrapping
+                // so daily unlock needs only the master password.
+                if header.wrapped_vault_key_password_only.is_none() {
+                    let pw_kek = keys::derive_kek(
+                        password,
+                        &header.kdf_salt,
+                        header.profile.kdf_params,
+                        None,
+                    )?;
+                    header.wrapped_vault_key_password_only =
+                        Some(keys::wrap_key(&pw_kek, &vault_key)?);
+                    dirty = true;
+                }
+                vault_key
+            }
+            None => {
+                let wrapping =
+                    header
+                        .wrapped_vault_key_password_only
+                        .as_ref()
+                        .ok_or_else(|| {
+                            "this vault requires its Secret Key once to enable password-only unlock"
+                                .to_string()
+                        })?;
+                let pw_kek =
+                    keys::derive_kek(password, &header.kdf_salt, header.profile.kdf_params, None)?;
+                keys::unwrap_key(&pw_kek, wrapping).map_err(|_| "wrong password".to_string())?
+            }
+        };
+        if dirty {
             Self::store_header(&mut conn, &header)?;
         }
         Self::ensure_sync_schema(&conn)?;
@@ -374,6 +426,10 @@ impl Vault {
         let kek = keys::derive_kek(password, &wire.kdf_salt, wire.kdf_params, Some(secret_key))?;
         let vault_key = keys::unwrap_key(&kek, &wire.wrapped_vault_key)
             .map_err(|_| "wrong password or secret key".to_string())?;
+        // Second wrapping under the password-only KEK (ADR-0010), so the
+        // joined device supports password-only unlock from the start.
+        let pw_kek = keys::derive_kek(password, &wire.kdf_salt, wire.kdf_params, None)?;
+        let wrapped_pw = keys::wrap_key(&pw_kek, &vault_key)?;
 
         let mut conn = Connection::open(path).map_err(|e| format!("open vault db: {e}"))?;
         let header = VaultHeader {
@@ -386,6 +442,7 @@ impl Vault {
             },
             kdf_salt: wire.kdf_salt,
             wrapped_vault_key: wire.wrapped_vault_key,
+            wrapped_vault_key_password_only: Some(wrapped_pw),
             created_at_ms: wire.created_at_ms,
             sync_address: Some(address.to_string()),
             bootstrap_package: Some(bootstrap.to_vec()),
@@ -766,6 +823,17 @@ impl Vault {
         )?;
         self.header.kdf_salt = new_salt;
         self.header.wrapped_vault_key = keys::wrap_key(&new_kek, &self.vault_key)?;
+        // Both wrappings move to the new password (ADR-0010); the vault
+        // key itself is unchanged, so biometric unlock keeps working
+        // (ADR-0009).
+        let new_pw_kek = keys::derive_kek(
+            new_password,
+            &self.header.kdf_salt,
+            self.header.profile.kdf_params,
+            None,
+        )?;
+        self.header.wrapped_vault_key_password_only =
+            Some(keys::wrap_key(&new_pw_kek, &self.vault_key)?);
         // The bootstrap package wraps the same vault key under the same
         // Secret Key, but the salt and wrapped key changed; reseal it so a
         // new device can still join (ADR-0002).
@@ -995,6 +1063,73 @@ mod tests {
             .unwrap();
         drop(vault);
         assert!(Vault::open_with_key(&path, &key, &check).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_with_password_only_after_create() {
+        let path = temp_vault_path("pw-only");
+        let sk = keys::random_bytes(KEY_LEN);
+        let vault = Vault::create(&path, "pw-1", Some(&sk), test_profile(), 0).unwrap();
+        drop(vault);
+        // No Secret Key needed for daily unlock (ADR-0010)...
+        assert!(Vault::open(&path, "pw-1", None).is_ok());
+        // ...but a wrong password still fails.
+        assert!(Vault::open(&path, "wrong", None).is_err());
+        // The Secret Key path keeps working too.
+        assert!(Vault::open(&path, "pw-1", Some(&sk)).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn password_only_migration_from_old_header() {
+        // Simulate a vault created before ADR-0010: strip the
+        // password-only wrapping from the stored header.
+        let path = temp_vault_path("migrate-old");
+        let sk = keys::random_bytes(KEY_LEN);
+        let vault = Vault::create(&path, "pw", Some(&sk), test_profile(), 0).unwrap();
+        drop(vault);
+        {
+            let conn = Connection::open(&path).unwrap();
+            let json: String = conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key = ?1",
+                    params![HEADER_META_KEY],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("wrapped_vault_key_password_only");
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE key = ?2",
+                params![value.to_string(), HEADER_META_KEY],
+            )
+            .unwrap();
+        }
+        // Password-only unlock fails until the vault is migrated...
+        assert!(Vault::open(&path, "pw", None).is_err());
+        // ...one unlock with the Secret Key migrates it...
+        let vault = Vault::open(&path, "pw", Some(&sk)).unwrap();
+        drop(vault);
+        // ...and now password-only unlock works.
+        assert!(Vault::open(&path, "pw", None).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn change_password_rewraps_password_only() {
+        let path = temp_vault_path("changepw-only");
+        let sk = keys::random_bytes(KEY_LEN);
+        let mut vault = Vault::create(&path, "old-pw", Some(&sk), test_profile(), 0).unwrap();
+        vault
+            .change_password("old-pw", "new-pw", Some(&sk))
+            .unwrap();
+        drop(vault);
+        assert!(Vault::open(&path, "new-pw", None).is_ok());
+        assert!(Vault::open(&path, "old-pw", None).is_err());
         let _ = std::fs::remove_file(&path);
     }
 

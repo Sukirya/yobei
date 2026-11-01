@@ -87,6 +87,10 @@ struct VaultStatus {
     /// Secret Key is mandatory (ADR-0001); kept in the payload so the UI can
     /// explain the recovery-kit requirement.
     secret_key_enabled: bool,
+    /// Whether daily unlock needs only the master password (ADR-0010):
+    /// true once the password-only wrapping exists. False on vaults that
+    /// still need one unlock with the Secret Key to migrate.
+    password_only_available: bool,
     vault_id: Option<String>,
     sync_address: Option<String>,
 }
@@ -106,6 +110,10 @@ fn vault_status(app: AppHandle, state: State<'_, AppState>) -> Result<VaultStatu
             .as_ref()
             .map(|h| h.profile.secret_key_enabled)
             .unwrap_or(true),
+        password_only_available: header
+            .as_ref()
+            .map(|h| h.wrapped_vault_key_password_only.is_some())
+            .unwrap_or(false),
         vault_id: guard
             .as_ref()
             .map(|s| s.vault_id().to_string())
@@ -167,11 +175,15 @@ fn unlock_vault(
 ) -> Result<String, String> {
     let path = vault_path(&app)?;
     Vault::peek_header(&path).ok_or_else(|| "no vault found".to_string())?;
-    if secret_key.trim().is_empty() {
-        return Err("this vault requires its Secret Key".to_string());
-    }
-    let secret_key_bytes = parse_secret_key(&secret_key)?;
-    let vault = Vault::open(&path, &password, Some(&secret_key_bytes))?;
+    // Daily unlock needs only the master password (ADR-0010); the Secret
+    // Key is optional here and only required for unmigrated vaults or as
+    // the recovery path.
+    let secret_key_bytes = if secret_key.trim().is_empty() {
+        None
+    } else {
+        Some(parse_secret_key(&secret_key)?)
+    };
+    let vault = Vault::open(&path, &password, secret_key_bytes.as_deref())?;
     let service = Service::new(vault);
     let vault_id = service.vault_id().to_string();
     let mut guard = state

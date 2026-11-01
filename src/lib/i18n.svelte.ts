@@ -32,6 +32,8 @@ const en = {
   "vault.unlock.password": "Master password",
   "vault.unlock.secretKey": "Secret Key",
   "vault.unlock.submit": "Unlock",
+  "vault.unlock.needSecretKeyOnce":
+    "Enter the Secret Key once to enable password-only unlock.",
   "vault.info": "Vault {id}…",
   "vault.changePassword": "Change master password",
   "vault.lock": "Lock",
@@ -209,6 +211,7 @@ const zhCN: Record<MessageKey, string> = {
   "vault.unlock.password": "主密码",
   "vault.unlock.secretKey": "Secret Key",
   "vault.unlock.submit": "解锁",
+  "vault.unlock.needSecretKeyOnce": "输入一次 Secret Key，即可启用仅密码解锁。",
   "vault.info": "保险库 {id}…",
   "vault.changePassword": "修改主密码",
   "vault.lock": "锁定",

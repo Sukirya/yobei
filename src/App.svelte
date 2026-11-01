@@ -19,6 +19,7 @@
     exists: boolean;
     unlocked: boolean;
     secret_key_enabled: boolean;
+    password_only_available: boolean;
     vault_id: string | null;
   }
   interface TotpConfig {
@@ -808,7 +809,10 @@
         placeholder={t("vault.unlock.secretKey")}
         bind:value={secretKeyInput}
       />
-      <button disabled={busy || !password || !secretKeyInput} onclick={unlock}>
+      {#if !status.password_only_available}
+        <p>{t("vault.unlock.needSecretKeyOnce")}</p>
+      {/if}
+      <button disabled={busy || !password} onclick={unlock}>
         {t("vault.unlock.submit")}
       </button>
     </section>
