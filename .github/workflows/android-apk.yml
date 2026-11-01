@@ -22,9 +22,9 @@ jobs:
   # The reference project's CI built but never ran its tests (DESIGN.md
   # section 6) - ours runs the core suite on every push.
   test-core:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -51,7 +51,7 @@ jobs:
   windows-check:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -80,9 +80,9 @@ jobs:
         run: bun run check
 
   worker-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -94,9 +94,9 @@ jobs:
         run: cd workers/sync && bun run typecheck
 
   build-android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -134,7 +134,7 @@ jobs:
           bun run tauri android build --debug --target aarch64 --ci
 
       - name: Upload Android debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: yobei-android-debug-apk
           path: src-tauri/gen/android/app/build/outputs/apk/**/debug/*.apk
@@ -148,9 +148,9 @@ jobs:
   # falls back to the debug keystore, which is only good for measuring
   # size and testing, never for distribution.
   build-android-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -206,7 +206,7 @@ jobs:
           bun run tauri android build --target aarch64 --ci
 
       - name: Upload Android release APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: yobei-android-release-apk
           path: src-tauri/gen/android/app/build/outputs/apk/**/release/*.apk

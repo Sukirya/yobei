@@ -84,8 +84,11 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        // Java 8 source/target is obsolete (JDK 21 warns); 11 is the
+        // lowest version the toolchain still supports without warnings
+        // and is safe for minSdk 24 via D8 desugaring.
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
     }
     buildFeatures {
         buildConfig = true
@@ -94,7 +97,7 @@ android {
 
 kotlin {
     compilerOptions {
-        jvmTarget = JvmTarget.JVM_1_8
+        jvmTarget = JvmTarget.JVM_11
     }
 }
 
