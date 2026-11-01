@@ -262,7 +262,7 @@ fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
 // ------------------------------------------------------- biometric unlock ---
 
 /// Biometric unlock state (ADR-0009). `state` is "available" |
-/// "no_hardware" | "not_enrolled" | "no_device_credential" | "unavailable"
+/// "no_hardware" | "not_enrolled" | "unavailable"
 /// | "unsupported" (non-Android); `enrolled` says whether this device
 /// already holds a wrapped vault key.
 #[derive(Serialize)]

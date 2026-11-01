@@ -167,7 +167,10 @@ class BiometricPlugin(private val activity: Activity) : Plugin(activity) {
       BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE -> "no_hardware"
       BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE -> "unavailable"
       BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> "not_enrolled"
-      BiometricManager.BIOMETRIC_ERROR_NO_DEVICE_CREDENTIAL -> "no_device_credential"
+      // NOTE: androidx.biometric has no NO_DEVICE_CREDENTIAL code (that
+      // constant only exists on the framework BiometricManager); a device
+      // with no lock screen reports NONE_ENROLLED here, which hides the
+      // feature the same way.
       else -> "unavailable"
     }
     val obj = JSObject()

@@ -18,8 +18,7 @@ const PLUGIN_IDENTIFIER: &str = "app.tauri.yobei.biometric";
 /// Outcome of a device-capability probe (Kotlin `status`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusResponse {
-    /// "available" | "no_hardware" | "not_enrolled" | "no_device_credential"
-    /// | "unavailable".
+    /// "available" | "no_hardware" | "not_enrolled" | "unavailable".
     pub state: String,
     /// Whether a wrapped vault key blob is stored on this device.
     pub enrolled: bool,
