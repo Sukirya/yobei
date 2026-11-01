@@ -2,9 +2,18 @@
   PLACEHOLDER UI — functional but deliberately plain.
   This whole file is a disposable test harness for the yobei-core
   commands; the real UI will be designed later and replace it wholesale.
+  All user-facing text comes from src/lib/i18n.svelte.ts (ADR-0008).
 -->
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import {
+    SUPPORTED_LOCALES,
+    formatNumber,
+    getLocale,
+    setLocale,
+    t,
+    type Locale,
+  } from "./lib/i18n.svelte";
 
   interface VaultStatus {
     exists: boolean;
@@ -15,39 +24,78 @@
   interface TotpConfig {
     secret: string;
     issuer: string | null;
+    account_name: string | null;
     digits: number;
     period_secs: number;
     algorithm: string;
   }
-  interface AccountData {
-    username: string;
-    password: string;
-    password_history: string[];
-    urls: { url: string; match_rule: string }[];
-    totp: TotpConfig | null;
-    passkeys: { rp_id: string; sign_count: number }[];
-    recovery_codes: { code: string; used: boolean }[];
-  }
-  interface Field {
+  interface CustomField {
     name: string;
     kind: string;
     value: string;
   }
-  interface VaultRecord {
+  interface EntryUrl {
+    url: string;
+    match_rule: string;
+  }
+  interface AccountPayload {
+    type: "account";
+    username: string;
+    password: string | null;
+    password_history: { password: string; changed_at_ms: number }[];
+    urls: EntryUrl[];
+    totp: TotpConfig | null;
+    passkeys: { rp_id: string; sign_count: number }[];
+    recovery_codes: { code: string; used: boolean }[];
+    custom_fields: CustomField[];
+  }
+  interface CardPayload {
+    type: "card";
+    cardholder_name: string;
+    number: string;
+    expiry_month: number | null | undefined;
+    expiry_year: number | null | undefined;
+    cvc: string | null;
+    pin: string | null;
+    billing_address: unknown | null;
+    custom_fields: CustomField[];
+  }
+  interface IdentityPayload {
+    type: "identity";
+    full_name: string;
+    first_name: string;
+    last_name: string;
+    emails: string[];
+    phones: string[];
+    addresses: unknown[];
+    custom_fields: CustomField[];
+  }
+  interface NotePayload {
+    type: "note";
+    content: string;
+    custom_fields: CustomField[];
+  }
+  type EntryPayload =
+    | AccountPayload
+    | CardPayload
+    | IdentityPayload
+    | NotePayload;
+  interface Entry {
     id: string;
     vault_id: string;
-    kind: string;
+    kind: "account" | "card" | "identity" | "note";
     title: string;
     favorite: boolean;
     tags: string[];
-    fields: Field[];
-    account: AccountData | null;
     notes: string;
     created_at_ms: number;
     updated_at_ms: number;
     version: number;
     hlc: number;
     deleted: boolean;
+    deleted_at_ms: number | null;
+    conflict_copy_of: string | null;
+    payload: EntryPayload;
   }
 
   let status = $state<VaultStatus | null>(null);
@@ -57,21 +105,24 @@
   // create / unlock forms
   let password = $state("");
   let password2 = $state("");
-  let useSecretKey = $state(false);
   let secretKeyInput = $state("");
   let generatedSecretKey = $state<string | null>(null);
+  let generatedAddress = $state<string | null>(null);
+
+  // join-existing-vault form
+  let showJoin = $state(false);
+  let joinServer = $state("");
+  let joinAddress = $state("");
+  let joinPassword = $state("");
+  let joinSecretKey = $state("");
 
   // vault screen
-  let records = $state<VaultRecord[]>([]);
+  let entries = $state<Entry[]>([]);
   let query = $state("");
   let showTrash = $state(false);
-  let selected = $state<VaultRecord | null>(null);
+  let selected = $state<Entry | null>(null);
   let newTitle = $state("");
   let newKind = $state("account");
-  let showPassword = $state(false);
-  let oldPw = $state("");
-  let newPw = $state("");
-  let showChangePw = $state(false);
 
   async function run<T>(fn: () => Promise<T>): Promise<T | undefined> {
     busy = true;
@@ -79,6 +130,8 @@
     try {
       return await fn();
     } catch (e) {
+      // Command errors are still English strings from the core; full
+      // localization waits for the CoreError refactor (ADR-0008 §6).
       error = String(e);
       return undefined;
     } finally {
@@ -91,46 +144,63 @@
     if (s) {
       status = s;
       if (s.unlocked) {
-        await refreshRecords();
+        await refreshEntries();
         await refreshSyncStatus();
       }
     }
   }
 
-  async function refreshRecords() {
+  async function refreshEntries() {
     const list = await run(() =>
-      invoke<VaultRecord[]>("list_records", {
+      invoke<Entry[]>("list_entries", {
         query,
         includeDeleted: showTrash,
       }),
     );
-    if (list) records = list;
+    if (list) entries = list;
   }
 
   async function createVault() {
     if (password !== password2) {
-      error = "两次输入的主密码不一致";
+      error = t("error.passwordMismatch");
       return;
     }
     const res = await run(() =>
-      invoke<{ vault_id: string; secret_key: string | null }>("create_vault", {
-        password,
-        useSecretKey,
-      }),
+      invoke<{ vault_id: string; secret_key: string; sync_address: string }>(
+        "create_vault",
+        { password },
+      ),
     );
     if (res) {
       generatedSecretKey = res.secret_key;
+      generatedAddress = res.sync_address;
       password = "";
       password2 = "";
       await refreshStatus();
     }
   }
 
+  async function joinVault() {
+    // Even if the first pull fails, the vault may have been adopted and
+    // unlocked locally; refresh so the UI reflects that.
+    await run(() =>
+      invoke<string>("join_vault", {
+        serverUrl: joinServer,
+        address: joinAddress,
+        password: joinPassword,
+        secretKey: joinSecretKey,
+      }),
+    );
+    joinPassword = "";
+    joinSecretKey = "";
+    await refreshStatus();
+  }
+
   async function unlock() {
     const res = await run(() =>
       invoke<string>("unlock_vault", {
         password,
-        secretKey: secretKeyInput || null,
+        secretKey: secretKeyInput,
       }),
     );
     if (res) {
@@ -143,83 +213,78 @@
   async function lock() {
     await run(() => invoke("lock_vault"));
     selected = null;
-    records = [];
+    entries = [];
     await refreshStatus();
   }
 
-  async function changePassword() {
-    const ok = await run(() =>
-      invoke("change_master_password", {
-        oldPassword: oldPw,
-        newPassword: newPw,
-        secretKey: secretKeyInput || null,
-      }),
-    );
-    if (ok !== undefined) {
-      oldPw = "";
-      newPw = "";
-      showChangePw = false;
-      error = "";
-      alert("主密码已修改");
-    }
-  }
-
-  async function createRecord() {
+  async function createEntry() {
     if (!newTitle.trim()) return;
-    const rec = await run(() =>
-      invoke<VaultRecord>("create_record", { kind: newKind, title: newTitle }),
+    const entry = await run(() =>
+      invoke<Entry>("create_entry", { kind: newKind, title: newTitle }),
     );
-    if (rec) {
+    if (entry) {
       newTitle = "";
-      selected = rec;
-      await refreshRecords();
+      selected = entry;
+      await refreshEntries();
     }
   }
 
   async function saveSelected() {
     if (!selected) return;
-    const rec = await run(() =>
-      invoke<VaultRecord>("save_record", { record: selected }),
+    const entry = await run(() =>
+      invoke<Entry>("save_entry", { entry: selected }),
     );
-    if (rec) {
-      selected = rec;
-      await refreshRecords();
+    if (entry) {
+      selected = entry;
+      await refreshEntries();
     }
   }
 
-  async function toggleFavorite(r: VaultRecord) {
+  async function toggleFavorite(entry: Entry) {
     await run(() =>
-      invoke("set_favorite", { id: r.id, favorite: !r.favorite }),
+      invoke("set_favorite", { id: entry.id, favorite: !entry.favorite }),
     );
-    await refreshRecords();
+    await refreshEntries();
   }
 
-  async function trash(r: VaultRecord) {
-    await run(() => invoke("delete_record", { id: r.id }));
-    if (selected?.id === r.id) selected = null;
-    await refreshRecords();
+  async function trashEntry(entry: Entry) {
+    await run(() => invoke("delete_entry", { id: entry.id }));
+    if (selected?.id === entry.id) selected = null;
+    await refreshEntries();
   }
 
-  async function restore(r: VaultRecord) {
-    await run(() => invoke("restore_record", { id: r.id }));
-    await refreshRecords();
+  async function restoreEntry(entry: Entry) {
+    await run(() => invoke("restore_entry", { id: entry.id }));
+    await refreshEntries();
   }
 
-  async function purge(r: VaultRecord) {
-    if (!confirm(`彻底删除「${r.title}」？此操作不可恢复。`)) return;
-    await run(() => invoke("purge_record", { id: r.id }));
-    if (selected?.id === r.id) selected = null;
-    await refreshRecords();
-  }
-
-  function select(r: VaultRecord) {
+  function select(entry: Entry) {
     // deep copy so edits don't mutate the list behind our back
-    selected = JSON.parse(JSON.stringify(r)) as VaultRecord;
-    showPassword = false;
+    selected = JSON.parse(JSON.stringify(entry)) as Entry;
   }
 
-  // --- TOTP live preview (recomputed every second from the editor's
-  // current config, so it works before saving too) ---
+  function accountOf(): AccountPayload | null {
+    return selected && selected.payload.type === "account"
+      ? selected.payload
+      : null;
+  }
+
+  function kindLabel(kind: string): string {
+    switch (kind) {
+      case "account":
+        return t("kind.account");
+      case "card":
+        return t("kind.card");
+      case "identity":
+        return t("kind.identity");
+      case "note":
+        return t("kind.note");
+      default:
+        return kind;
+    }
+  }
+
+  // --- TOTP live preview ---
   interface TotpNow {
     code: string;
     remaining_secs: number;
@@ -230,7 +295,7 @@
   let otpauthInput = $state("");
 
   $effect(() => {
-    const cfg = selected?.account?.totp;
+    const cfg = accountOf()?.totp ?? null;
     if (!cfg || !cfg.secret) {
       liveCode = "";
       return;
@@ -246,27 +311,78 @@
       }
     };
     tick();
-    const t = setInterval(tick, 1000);
+    const timer = setInterval(tick, 1000);
     return () => {
       alive = false;
-      clearInterval(t);
+      clearInterval(timer);
     };
   });
 
-  // --- password generator + strength (editor) ---
+  // --- password generator + strength ---
+  type WarningCode =
+    | { code: "empty" }
+    | { code: "common_password" }
+    | { code: "common_word"; word: string }
+    | { code: "sequence" }
+    | { code: "repeated_characters" }
+    | { code: "year" };
+
   interface StrengthReport {
     entropy_bits: number;
     score: number;
-    warnings: string[];
-    offline_crack_estimate: string;
+    warnings: WarningCode[];
+    offline_crack_seconds: number;
   }
-  const SCORE_LABELS = ["很弱", "弱", "一般", "强", "极强"];
+
+  const SCORE_KEYS = [
+    "score.0",
+    "score.1",
+    "score.2",
+    "score.3",
+    "score.4",
+  ] as const;
+
+  function warningText(warning: WarningCode): string {
+    switch (warning.code) {
+      case "empty":
+        return t("warning.empty");
+      case "common_password":
+        return t("warning.commonPassword");
+      case "common_word":
+        return t("warning.commonWord", { word: warning.word });
+      case "sequence":
+        return t("warning.sequence");
+      case "repeated_characters":
+        return t("warning.repeatedCharacters");
+      case "year":
+        return t("warning.year");
+      default:
+        return "";
+    }
+  }
+
+  function crackText(seconds: number): string {
+    if (seconds < 1) return t("crack.instant");
+    if (seconds < 60) return t("crack.seconds", { value: formatNumber(seconds) });
+    const minutes = seconds / 60;
+    if (minutes < 60) return t("crack.minutes", { value: formatNumber(minutes) });
+    const hours = minutes / 60;
+    if (hours < 24) return t("crack.hours", { value: formatNumber(hours) });
+    const days = hours / 24;
+    if (days < 365) return t("crack.days", { value: formatNumber(days) });
+    const years = days / 365;
+    if (years < 1e6) return t("crack.years", { value: formatNumber(years) });
+    if (years < 1e9)
+      return t("crack.millionYears", { value: formatNumber(years / 1e6) });
+    return t("crack.universe");
+  }
+
   let genLength = $state(20);
   let genSymbols = $state(true);
   let strength = $state<StrengthReport | null>(null);
 
   $effect(() => {
-    const pw = selected?.account?.password ?? "";
+    const pw = accountOf()?.password ?? "";
     if (!pw) {
       strength = null;
       return;
@@ -283,7 +399,8 @@
   });
 
   async function genPassword() {
-    if (!selected?.account) return;
+    const acct = accountOf();
+    if (!acct) return;
     const pw = await run(() =>
       invoke<string>("generate_password", {
         options: {
@@ -296,46 +413,45 @@
         },
       }),
     );
-    if (pw && selected?.account) selected.account.password = pw;
+    if (pw) acct.password = pw;
   }
 
   async function genPassphrase() {
-    if (!selected?.account) return;
+    const acct = accountOf();
+    if (!acct) return;
     const pw = await run(() =>
-      invoke<string>("generate_passphrase", {
-        wordCount: 5,
-        separator: "-",
-      }),
+      invoke<string>("generate_passphrase", { wordCount: 5, separator: "-" }),
     );
-    if (pw && selected?.account) selected.account.password = pw;
+    if (pw) acct.password = pw;
   }
 
   let passkeyRp = $state("");
   async function createPasskey() {
-    if (!selected?.account) return;
-    const rec = await run(() =>
-      invoke<VaultRecord>("passkey_create", {
-        recordId: selected!.id,
+    const acct = accountOf();
+    if (!selected || !acct || !passkeyRp.trim()) return;
+    const entry = await run(() =>
+      invoke<Entry>("passkey_create", {
+        entryId: selected!.id,
         rpId: passkeyRp,
-        userName: selected!.account!.username || "user",
+        userName: acct.username || "user",
       }),
     );
-    if (rec) {
-      selected = rec;
+    if (entry) {
+      selected = entry;
       passkeyRp = "";
-      await refreshRecords();
+      await refreshEntries();
     }
   }
 
   async function genTotpSecret() {
-    if (!selected?.account?.totp) return;
-    selected.account.totp.secret = await invoke<string>(
-      "generate_totp_secret",
-    );
+    const acct = accountOf();
+    if (!acct?.totp) return;
+    acct.totp.secret = await invoke<string>("generate_totp_secret");
   }
 
   async function importOtpauth() {
-    if (!selected?.account || !otpauthInput.trim()) return;
+    const acct = accountOf();
+    if (!acct || !otpauthInput.trim()) return;
     const parsed = await run(() =>
       invoke<{
         config: TotpConfig;
@@ -343,43 +459,46 @@
         label_issuer: string | null;
       }>("parse_otpauth", { uri: otpauthInput }),
     );
-    if (parsed && selected?.account) {
-      selected.account.totp = parsed.config;
-      if (!selected.account.username && parsed.account_name) {
-        selected.account.username = parsed.account_name;
+    if (parsed) {
+      acct.totp = parsed.config;
+      if (!acct.username && parsed.account_name) {
+        acct.username = parsed.account_name;
       }
       otpauthInput = "";
     }
   }
 
-  // editor helpers (operate on `selected`)
-  function firstUrl(): string {
-    return selected?.account?.urls[0]?.url ?? "";
-  }
-  function setFirstUrl(v: string) {
-    if (!selected?.account) return;
-    if (selected.account.urls.length === 0) {
-      selected.account.urls = [{ url: v, match_rule: "exact_domain" }];
-    } else {
-      selected.account.urls[0].url = v;
-    }
-  }
   function enableTotp() {
-    if (!selected?.account) return;
-    selected.account.totp = {
+    const acct = accountOf();
+    if (!acct) return;
+    acct.totp = {
       secret: "",
       issuer: null,
+      account_name: null,
       digits: 6,
       period_secs: 30,
       algorithm: "SHA1",
     };
   }
-  function addField() {
-    selected?.fields.push({ name: "", kind: "text", value: "" });
+
+  function setFirstUrl(value: string) {
+    const acct = accountOf();
+    if (!acct) return;
+    if (acct.urls.length === 0) {
+      acct.urls = [{ url: value, match_rule: "exact_host" }];
+    } else {
+      acct.urls[0].url = value;
+    }
   }
-  function removeField(i: number) {
-    selected?.fields.splice(i, 1);
+
+  function setTags(value: string) {
+    if (!selected) return;
+    selected.tags = value
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean);
   }
+
   // --- import / export ---
   interface PreviewItem {
     title: string;
@@ -419,8 +538,8 @@
     if (n !== undefined) {
       impPreview = null;
       impText = "";
-      await refreshRecords();
-      alert(`已导入 ${n} 条记录`);
+      await refreshEntries();
+      alert(t("import.done", { count: n }));
     }
   }
 
@@ -440,6 +559,12 @@
     device_id: string | null;
     pending_ops: number;
   }
+  interface DeviceDto {
+    device_id: string;
+    name: string;
+    created_at_ms: number;
+    last_seen_ms: number | null;
+  }
   interface SyncReport {
     pushed: number;
     duplicates: number;
@@ -447,10 +572,13 @@
     pulled_updated: number;
     conflicts: number;
     conflict_copies: number;
+    discarded: number;
   }
   let syncUrl = $state("");
   let syncStat = $state<SyncStatusDto | null>(null);
   let syncMsg = $state("");
+  let devices = $state<DeviceDto[]>([]);
+  let devicesMsg = $state("");
 
   async function refreshSyncStatus() {
     const s = await run(() => invoke<SyncStatusDto>("sync_status"));
@@ -463,339 +591,614 @@
     );
     if (s) {
       syncStat = s;
-      syncMsg = "设备已注册，同步已配置";
+      syncMsg = t("sync.registered");
+      await refreshDevices();
     }
+  }
+
+  async function refreshDevices() {
+    const list = await run(() => invoke<DeviceDto[]>("sync_devices"));
+    if (list) devices = list;
+    devicesMsg = "";
+  }
+
+  async function revokeDevice(device: DeviceDto) {
+    const label = device.name || device.device_id.slice(0, 8);
+    if (!confirm(t("sync.revokeConfirm", { name: label }))) return;
+    const ok = await run(() =>
+      invoke("sync_revoke_device", { deviceId: device.device_id }),
+    );
+    if (ok !== undefined) {
+      devicesMsg = t("sync.revoked");
+      await refreshDevices();
+      await refreshSyncStatus();
+    }
+  }
+
+  function formatTime(ms: number | null): string {
+    if (!ms) return t("sync.never");
+    return new Intl.DateTimeFormat(getLocale(), {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(ms));
   }
 
   async function doSyncNow() {
     const r = await run(() => invoke<SyncReport>("sync_now"));
     if (r) {
-      syncMsg = `同步完成：推送 ${r.pushed}，拉取新增 ${r.pulled_new}、更新 ${r.pulled_updated}，冲突 ${r.conflicts}（冲突副本 ${r.conflict_copies}）`;
-      await refreshRecords();
+      syncMsg = t("sync.done", {
+        pushed: r.pushed,
+        new: r.pulled_new,
+        updated: r.pulled_updated,
+        conflicts: r.conflicts,
+        copies: r.conflict_copies,
+        discarded: r.discarded,
+      });
+      await refreshEntries();
       await refreshSyncStatus();
     }
   }
 
-  function tagsText(): string {
-    return selected?.tags.join(", ") ?? "";
-  }
-  function setTags(v: string) {
-    if (!selected) return;
-    selected.tags = v
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
+  // --- change master password ---
+  let oldPw = $state("");
+  let newPw = $state("");
+  let showChangePw = $state(false);
+  async function changePassword() {
+    const ok = await run(() =>
+      invoke("change_master_password", {
+        oldPassword: oldPw,
+        newPassword: newPw,
+        secretKey: secretKeyInput,
+      }),
+    );
+    if (ok !== undefined) {
+      oldPw = "";
+      newPw = "";
+      showChangePw = false;
+      alert(t("changePassword.done"));
+    }
   }
 
   refreshStatus();
 </script>
 
 <main>
-  <h1>yobei <small>（占位界面 · 功能验证用）</small></h1>
+  <div class="topbar">
+    <h1>{t("app.title")} <small>{t("app.subtitle")}</small></h1>
+    <label class="language">
+      {t("app.language")}
+      <select
+        value={getLocale()}
+        onchange={(e) => setLocale((e.target as HTMLSelectElement).value as Locale)}
+      >
+        {#each SUPPORTED_LOCALES as loc}
+          <option value={loc}>{loc === "en" ? "English" : "简体中文"}</option>
+        {/each}
+      </select>
+    </label>
+  </div>
 
   {#if error}<p class="error">{error}</p>{/if}
 
   {#if status === null}
-    <p>加载中…</p>
+    <p>{t("app.loading")}</p>
   {:else if generatedSecretKey}
     <section>
-      <h2>保险库已创建</h2>
-      <p>你启用了 Secret Key。它只显示这一次，请保存到安全的地方——解锁时需要它 + 主密码：</p>
+      <h2>{t("vault.created.title")}</h2>
+      <p>{t("vault.created.body")}</p>
       <code class="secret">{generatedSecretKey}</code>
-      <button onclick={() => (generatedSecretKey = null)}>我已保存</button>
+      {#if generatedAddress}
+        <p>{t("vault.created.addressLabel")}:</p>
+        <code class="secret">{generatedAddress}</code>
+      {/if}
+      <button
+        onclick={() => {
+          generatedSecretKey = null;
+          generatedAddress = null;
+        }}
+      >
+        {t("vault.created.saved")}
+      </button>
     </section>
   {:else if !status.exists}
-    <section>
-      <h2>创建保险库</h2>
-      <input type="password" placeholder="主密码" bind:value={password} />
-      <input type="password" placeholder="确认主密码" bind:value={password2} />
-      <label>
-        <input type="checkbox" bind:checked={useSecretKey} />
-        启用 Secret Key（多一层设备外密钥，更安全）
-      </label>
-      <button disabled={busy || !password} onclick={createVault}>创建</button>
-    </section>
+    {#if showJoin}
+      <section>
+        <h2>{t("join.title")}</h2>
+        <p class="warn">{t("join.hint")}</p>
+        <input
+          type="text"
+          placeholder={t("join.serverUrl")}
+          bind:value={joinServer}
+        />
+        <input
+          type="text"
+          placeholder={t("join.address")}
+          bind:value={joinAddress}
+        />
+        <input
+          type="password"
+          placeholder={t("join.password")}
+          bind:value={joinPassword}
+        />
+        <input
+          type="text"
+          placeholder={t("join.secretKey")}
+          bind:value={joinSecretKey}
+        />
+        <div class="row">
+          <button
+            disabled={busy ||
+              !joinServer ||
+              !joinAddress ||
+              !joinPassword ||
+              !joinSecretKey}
+            onclick={joinVault}
+          >
+            {t("join.submit")}
+          </button>
+          <button onclick={() => (showJoin = false)}>
+            {t("join.switchToCreate")}
+          </button>
+        </div>
+      </section>
+    {:else}
+      <section>
+        <h2>{t("vault.create.title")}</h2>
+        <input
+          type="password"
+          placeholder={t("vault.create.password")}
+          bind:value={password}
+        />
+        <input
+          type="password"
+          placeholder={t("vault.create.confirm")}
+          bind:value={password2}
+        />
+        <p class="warn">{t("vault.create.warning")}</p>
+        <div class="row">
+          <button disabled={busy || !password} onclick={createVault}>
+            {t("vault.create.submit")}
+          </button>
+          <button onclick={() => (showJoin = true)}>
+            {t("join.switchToJoin")}
+          </button>
+        </div>
+      </section>
+    {/if}
   {:else if !status.unlocked}
     <section>
-      <h2>解锁保险库</h2>
-      <input type="password" placeholder="主密码" bind:value={password} />
-      {#if status.secret_key_enabled}
-        <input type="text" placeholder="Secret Key" bind:value={secretKeyInput} />
-      {/if}
-      <button disabled={busy || !password} onclick={unlock}>解锁</button>
+      <h2>{t("vault.unlock.title")}</h2>
+      <input
+        type="password"
+        placeholder={t("vault.unlock.password")}
+        bind:value={password}
+      />
+      <input
+        type="text"
+        placeholder={t("vault.unlock.secretKey")}
+        bind:value={secretKeyInput}
+      />
+      <button disabled={busy || !password || !secretKeyInput} onclick={unlock}>
+        {t("vault.unlock.submit")}
+      </button>
     </section>
   {:else}
     <section>
       <div class="row">
-        <span>保险库 {status.vault_id?.slice(0, 8)}…</span>
-        <button onclick={() => (showChangePw = !showChangePw)}>改主密码</button>
-        <button onclick={lock}>锁定</button>
+        <span>{t("vault.info", { id: status.vault_id?.slice(0, 8) ?? "" })}</span>
+        <button onclick={() => (showChangePw = !showChangePw)}>
+          {t("vault.changePassword")}
+        </button>
+        <button onclick={lock}>{t("vault.lock")}</button>
       </div>
       {#if showChangePw}
         <div class="row">
-          <input type="password" placeholder="当前主密码" bind:value={oldPw} />
-          <input type="password" placeholder="新主密码" bind:value={newPw} />
-          {#if status.secret_key_enabled}
-            <input type="text" placeholder="Secret Key" bind:value={secretKeyInput} />
-          {/if}
-          <button disabled={!oldPw || !newPw} onclick={changePassword}>确认修改</button>
+          <input
+            type="password"
+            placeholder={t("changePassword.current")}
+            bind:value={oldPw}
+          />
+          <input
+            type="password"
+            placeholder={t("changePassword.new")}
+            bind:value={newPw}
+          />
+          <input
+            type="text"
+            placeholder={t("changePassword.secretKey")}
+            bind:value={secretKeyInput}
+          />
+          <button
+            disabled={!oldPw || !newPw || !secretKeyInput}
+            onclick={changePassword}
+          >
+            {t("changePassword.confirm")}
+          </button>
         </div>
       {/if}
 
       <div class="row">
         <input
           type="search"
-          placeholder="搜索标题 / 用户名 / 标签…"
+          placeholder={t("search.placeholder")}
           bind:value={query}
-          oninput={refreshRecords}
+          oninput={refreshEntries}
         />
         <label>
-          <input type="checkbox" bind:checked={showTrash} onchange={refreshRecords} />
-          回收站
+          <input
+            type="checkbox"
+            bind:checked={showTrash}
+            onchange={refreshEntries}
+          />
+          {t("search.trash")}
         </label>
       </div>
       <div class="row">
-        <input type="text" placeholder="新记录标题" bind:value={newTitle} />
+        <input
+          type="text"
+          placeholder={t("newEntry.title")}
+          bind:value={newTitle}
+        />
         <select bind:value={newKind}>
-          <option value="account">账号</option>
-          <option value="card">银行卡</option>
-          <option value="identity">身份</option>
-          <option value="note">笔记</option>
-          <option value="api_key">API 密钥</option>
-          <option value="ssh_key">SSH 密钥</option>
-          <option value="custom">自定义</option>
+          <option value="account">{t("kind.account")}</option>
+          <option value="card">{t("kind.card")}</option>
+          <option value="identity">{t("kind.identity")}</option>
+          <option value="note">{t("kind.note")}</option>
         </select>
-        <button disabled={!newTitle.trim()} onclick={createRecord}>新建</button>
+        <button disabled={!newTitle.trim()} onclick={createEntry}>
+          {t("newEntry.submit")}
+        </button>
       </div>
 
       <ul class="list">
-        {#each records as r (r.id)}
-          <li class:deleted={r.deleted}>
-            <button class="title" onclick={() => select(r)}>
-              {r.favorite ? "★ " : ""}{r.title}
-              <small>（{r.kind}{r.account ? ` · ${r.account.username}` : ""}）</small>
+        {#each entries as entry (entry.id)}
+          <li class:deleted={entry.deleted}>
+            <button class="title" onclick={() => select(entry)}>
+              {entry.favorite ? "★ " : ""}{entry.title}
+              <small>· {kindLabel(entry.kind)}</small>
+              {#if entry.conflict_copy_of}
+                <span class="badge">{t("list.conflictCopy")}</span>
+              {/if}
             </button>
-            <button onclick={() => toggleFavorite(r)}>{r.favorite ? "取消收藏" : "收藏"}</button>
-            {#if r.deleted}
-              <button onclick={() => restore(r)}>恢复</button>
-              <button onclick={() => purge(r)}>彻底删除</button>
+            <button onclick={() => toggleFavorite(entry)}>
+              {entry.favorite ? t("list.unfavorite") : t("list.favorite")}
+            </button>
+            {#if entry.deleted}
+              <button onclick={() => restoreEntry(entry)}>
+                {t("list.restore")}
+              </button>
             {:else}
-              <button onclick={() => trash(r)}>删除</button>
+              <button onclick={() => trashEntry(entry)}>
+                {t("list.delete")}
+              </button>
             {/if}
           </li>
         {/each}
-        {#if records.length === 0}<li>（暂无记录）</li>{/if}
+        {#if entries.length === 0}<li>{t("list.empty")}</li>{/if}
       </ul>
 
       {#if selected}
         <section class="editor">
-          <h2>编辑</h2>
-          <label>标题 <input type="text" bind:value={selected.title} /></label>
-          {#if selected.account}
+          <h2>{t("editor.title")}</h2>
+          <label>
+            {t("editor.title")}
+            <input type="text" bind:value={selected.title} />
+          </label>
+
+          {#if selected.payload.type === "account"}
+            {@const acct = selected.payload as AccountPayload}
             <label>
-              用户名
-              <input type="text" bind:value={selected.account.username} />
+              {t("editor.username")}
+              <input type="text" bind:value={acct.username} />
             </label>
             <label>
-              密码
+              {t("editor.password")}
               <input
-                type={showPassword ? "text" : "password"}
-                bind:value={selected.account.password}
+                type="text"
+                value={acct.password ?? ""}
+                oninput={(e) =>
+                  (acct.password = (e.target as HTMLInputElement).value || null)}
               />
-              <button onclick={() => (showPassword = !showPassword)}>
-                {showPassword ? "隐藏" : "显示"}
-              </button>
             </label>
             <div class="row">
-              <span>长度</span>
+              <span>{t("editor.length")}</span>
               <input type="number" min="6" max="128" bind:value={genLength} />
               <label>
-                <input type="checkbox" bind:checked={genSymbols} /> 符号
+                <input type="checkbox" bind:checked={genSymbols} />
+                {t("editor.symbols")}
               </label>
-              <button onclick={genPassword}>生成密码</button>
-              <button onclick={genPassphrase}>生成短语</button>
+              <button onclick={genPassword}>{t("editor.generatePassword")}</button>
+              <button onclick={genPassphrase}>{t("editor.generatePhrase")}</button>
             </div>
             {#if strength}
               <p class="strength">
-                强度：{SCORE_LABELS[strength.score]}（{strength.entropy_bits.toFixed(
-                  0,
-                )} bits · 离线破解约 {strength.offline_crack_estimate}）
+                {t("editor.strength", {
+                  score: t(SCORE_KEYS[strength.score]),
+                  bits: formatNumber(strength.entropy_bits),
+                  time: crackText(strength.offline_crack_seconds),
+                })}
                 {#if strength.warnings.length}
-                  <br />⚠ {strength.warnings.join("；")}
+                  <br />⚠ {strength.warnings.map(warningText).join("; ")}
                 {/if}
               </p>
             {/if}
             <label>
-              网址
+              {t("editor.url")}
               <input
                 type="text"
-                value={firstUrl()}
+                value={acct.urls[0]?.url ?? ""}
                 oninput={(e) => setFirstUrl((e.target as HTMLInputElement).value)}
               />
             </label>
-            {#if selected.account.totp}
+            {#if acct.totp}
               <label>
-                TOTP 密钥
-                <input type="text" bind:value={selected.account.totp.secret} />
+                {t("editor.totpSecret")}
+                <input type="text" bind:value={acct.totp.secret} />
               </label>
               <div class="row">
-                <button onclick={genTotpSecret}>生成密钥</button>
+                <button onclick={genTotpSecret}>{t("editor.generateSecret")}</button>
                 {#if liveCode}
                   <span class="totp-code">{liveCode}</span>
-                  <span>（{liveRemaining} 秒后刷新）</span>
+                  <span>{t("editor.secondsLeft", { seconds: liveRemaining })}</span>
                 {/if}
               </div>
               <label>
-                TOTP 发行方
-                <input
-                  type="text"
-                  bind:value={selected.account.totp.issuer}
-                />
+                {t("editor.issuer")}
+                <input type="text" bind:value={acct.totp.issuer} />
               </label>
               <div class="row">
                 <input
                   type="text"
-                  placeholder="粘贴 otpauth:// 链接导入"
+                  placeholder={t("editor.otpauthPlaceholder")}
                   bind:value={otpauthInput}
                 />
                 <button disabled={!otpauthInput.trim()} onclick={importOtpauth}>
-                  导入
+                  {t("editor.import")}
                 </button>
               </div>
             {:else}
-              <button onclick={enableTotp}>添加 TOTP</button>
+              <button onclick={enableTotp}>{t("editor.addTotp")}</button>
             {/if}
-            <h3>通行密钥</h3>
-            {#each selected.account.passkeys as pk}
-              <p>🔑 {pk.rp_id}（签名计数 {pk.sign_count}）</p>
+            <h3>{t("editor.passkeys")}</h3>
+            {#each acct.passkeys as pk}
+              <p>
+                🔑 {pk.rp_id} · {t("editor.signCount", { count: pk.sign_count })}
+              </p>
             {/each}
             <div class="row">
               <input
                 type="text"
-                placeholder="网站域名（如 github.com）"
+                placeholder={t("editor.rpPlaceholder")}
                 bind:value={passkeyRp}
               />
               <button disabled={!passkeyRp.trim()} onclick={createPasskey}>
-                新建通行密钥
+                {t("editor.createPasskey")}
               </button>
             </div>
+          {:else if selected.payload.type === "card"}
+            {@const card = selected.payload as CardPayload}
+            <label>
+              {t("editor.cardholder")}
+              <input type="text" bind:value={card.cardholder_name} />
+            </label>
+            <label>
+              {t("editor.number")}
+              <input type="text" bind:value={card.number} />
+            </label>
+            <div class="row">
+              <label>
+                {t("editor.expMonth")}
+                <input type="number" bind:value={card.expiry_month} />
+              </label>
+              <label>
+                {t("editor.expYear")}
+                <input type="number" bind:value={card.expiry_year} />
+              </label>
+              <label>
+                {t("editor.cvc")}
+                <input type="text" bind:value={card.cvc} />
+              </label>
+              <label>
+                {t("editor.pin")}
+                <input type="text" bind:value={card.pin} />
+              </label>
+            </div>
+          {:else if selected.payload.type === "identity"}
+            {@const identity = selected.payload as IdentityPayload}
+            <label>
+              {t("editor.fullName")}
+              <input type="text" bind:value={identity.full_name} />
+            </label>
+            <div class="row">
+              <label>
+                {t("editor.firstName")}
+                <input type="text" bind:value={identity.first_name} />
+              </label>
+              <label>
+                {t("editor.lastName")}
+                <input type="text" bind:value={identity.last_name} />
+              </label>
+            </div>
+            <label>
+              {t("editor.email")}
+              <input
+                type="text"
+                value={identity.emails[0] ?? ""}
+                oninput={(e) =>
+                  (identity.emails = [(e.target as HTMLInputElement).value])}
+              />
+            </label>
+            <label>
+              {t("editor.phone")}
+              <input
+                type="text"
+                value={identity.phones[0] ?? ""}
+                oninput={(e) =>
+                  (identity.phones = [(e.target as HTMLInputElement).value])}
+              />
+            </label>
+          {:else}
+            {@const note = selected.payload as NotePayload}
+            <label>
+              {t("editor.content")}
+              <textarea bind:value={note.content} rows="8"></textarea>
+            </label>
           {/if}
+
           <label>
-            标签（逗号分隔）
+            {t("editor.tags")}
             <input
               type="text"
-              value={tagsText()}
+              value={selected.tags.join(", ")}
               oninput={(e) => setTags((e.target as HTMLInputElement).value)}
             />
           </label>
-          <label>备注 <textarea bind:value={selected.notes} rows="3"></textarea></label>
-
-          <h3>自定义字段</h3>
-          {#each selected.fields as f, i}
-            <div class="row">
-              <input type="text" placeholder="名称" bind:value={f.name} />
-              <input type="text" placeholder="值" bind:value={f.value} />
-              <button onclick={() => removeField(i)}>移除</button>
-            </div>
-          {/each}
-          <button onclick={addField}>加字段</button>
+          <label>
+            {t("editor.notes")}
+            <textarea bind:value={selected.notes} rows="3"></textarea>
+          </label>
 
           <div class="row">
-            <button disabled={busy} onclick={saveSelected}>保存</button>
-            <button onclick={() => (selected = null)}>关闭</button>
+            <button disabled={busy} onclick={saveSelected}>
+              {t("editor.save")}
+            </button>
+            <button onclick={() => (selected = null)}>
+              {t("editor.close")}
+            </button>
           </div>
         </section>
       {/if}
 
       <section class="editor">
-        <h2>导入</h2>
+        <h2>{t("import.title")}</h2>
         <div class="row">
           <select bind:value={impFormat}>
-            <option value="csv">CSV（Bitwarden / Chrome / 通用）</option>
-            <option value="bitwarden_json">Bitwarden JSON</option>
-            <option value="keepass_xml">KeePass XML</option>
-            <option value="yobei_json">yobei JSON</option>
-            <option value="yobei_encrypted">yobei 加密导出</option>
+            <option value="csv">{t("import.formatCsv")}</option>
+            <option value="bitwarden_json">{t("import.formatBitwardenJson")}</option>
+            <option value="keepass_xml">{t("import.formatKeepass")}</option>
+            <option value="yobei_json">{t("import.formatYobeiJson")}</option>
+            <option value="yobei_encrypted">
+              {t("import.formatYobeiEncrypted")}
+            </option>
           </select>
           {#if impFormat === "yobei_encrypted"}
             <input
               type="password"
-              placeholder="导出密码"
+              placeholder={t("import.exportPassword")}
               bind:value={impPassword}
             />
           {/if}
         </div>
         <textarea
           rows="5"
-          placeholder="把文件内容粘贴到这里（占位界面暂用粘贴代替文件选择）"
+          placeholder={t("import.paste")}
           bind:value={impText}
         ></textarea>
         <div class="row">
-          <button disabled={!impText.trim()} onclick={doPreview}>预览</button>
-          <button disabled={!impText.trim()} onclick={doImport}>直接导入</button>
+          <button disabled={!impText.trim()} onclick={doPreview}>
+            {t("import.preview")}
+          </button>
+          <button disabled={!impText.trim()} onclick={doImport}>
+            {t("import.submit")}
+          </button>
         </div>
         {#if impPreview}
           <ul class="list">
             {#each impPreview as p}
+              {@const flags = [
+                p.has_username ? t("import.flagUsername") : "",
+                p.has_password ? t("import.flagPassword") : "",
+                p.has_totp ? t("import.flagTotp") : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
               <li>
                 {p.title}
                 <small>
-                  （{p.kind} · {p.has_username ? "有用户名 " : ""}{p.has_password
-                    ? "有密码 "
-                    : ""}{p.has_totp ? "有TOTP " : ""}网址×{p.url_count} 字段×{p.field_count}）
+                  {t("import.previewLine", {
+                    kind: kindLabel(p.kind),
+                    flags: flags ? `${flags} · ` : "",
+                    urls: p.url_count,
+                    fields: p.field_count,
+                  })}
                 </small>
               </li>
             {/each}
           </ul>
-          <button onclick={doImport}>确认导入 {impPreview.length} 条</button>
+          <button onclick={doImport}>
+            {t("import.commit", { count: impPreview.length })}
+          </button>
         {/if}
 
-        <h2>导出</h2>
+        <h2>{t("export.title")}</h2>
         <div class="row">
-          <button onclick={() => doExport("csv")}>导出 CSV</button>
-          <button onclick={() => doExport("json")}>导出 JSON</button>
+          <button onclick={() => doExport("csv")}>{t("export.csv")}</button>
+          <button onclick={() => doExport("json")}>{t("export.json")}</button>
           <input
             type="password"
-            placeholder="加密导出密码"
+            placeholder={t("export.password")}
             bind:value={expPassword}
           />
           <button disabled={!expPassword} onclick={() => doExport("encrypted")}>
-            加密导出（推荐）
+            {t("export.encrypted")}
           </button>
         </div>
-        <p class="warn">
-          注意：CSV / JSON 导出是明文，只能用于迁移，存好后请删除。
-        </p>
+        <p class="warn">{t("export.plaintextWarning")}</p>
         {#if expText}
           <textarea rows="8" readonly value={expText}></textarea>
         {/if}
       </section>
 
       <section class="editor">
-        <h2>同步</h2>
+        <h2>{t("sync.title")}</h2>
         {#if syncStat?.configured}
           <p>
-            服务器：{syncStat.server_url}<br />
-            设备：{syncStat.device_id?.slice(0, 8)}… · 待推送操作：{syncStat.pending_ops}
+            {t("sync.server", { url: syncStat.server_url ?? "" })}<br />
+            {t("sync.device", {
+              id: syncStat.device_id?.slice(0, 8) ?? "",
+              pending: syncStat.pending_ops,
+            })}
           </p>
           <div class="row">
-            <button disabled={busy} onclick={doSyncNow}>立即同步</button>
-            <button onclick={refreshSyncStatus}>刷新状态</button>
+            <button disabled={busy} onclick={doSyncNow}>{t("sync.now")}</button>
+            <button onclick={refreshSyncStatus}>{t("sync.refresh")}</button>
+            <button onclick={refreshDevices}>{t("sync.devices")}</button>
           </div>
+          {#if devices.length}
+            <ul class="list">
+              {#each devices as device (device.device_id)}
+                <li>
+                  <span class="title">
+                    {device.name || device.device_id.slice(0, 8)}
+                    {#if device.device_id === syncStat?.device_id}
+                      <small>· {t("sync.currentDevice")}</small>
+                    {/if}
+                    <small>
+                      · {t("sync.lastSeen", {
+                        time: formatTime(device.last_seen_ms),
+                      })}
+                    </small>
+                  </span>
+                  <button onclick={() => revokeDevice(device)}>
+                    {t("sync.revoke")}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+          {#if devicesMsg}<p>{devicesMsg}</p>{/if}
         {:else}
           <div class="row">
             <input
               type="text"
-              placeholder="同步服务器地址（如 https://yobei-sync.xxx.workers.dev）"
+              placeholder={t("sync.urlPlaceholder")}
               bind:value={syncUrl}
             />
             <button disabled={!syncUrl.trim()} onclick={doSyncConfigure}>
-              注册本设备
+              {t("sync.register")}
             </button>
           </div>
-          <p class="warn">
-            服务器需自行部署（workers/sync），它只保存密文。注册后令牌只存本机保险库内。
-          </p>
+          <p class="warn">{t("sync.deployWarning")}</p>
         {/if}
         {#if syncMsg}<p>{syncMsg}</p>{/if}
       </section>
@@ -808,7 +1211,7 @@
     font-family: system-ui, sans-serif;
   }
   main {
-    max-width: 720px;
+    max-width: 760px;
     margin: 0 auto;
     padding: 16px;
   }
@@ -817,6 +1220,19 @@
     flex-direction: column;
     gap: 8px;
     margin-top: 12px;
+  }
+  .topbar {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .language {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
   }
   .row {
     display: flex;
@@ -848,6 +1264,14 @@
   .title {
     flex: 1;
     text-align: left;
+  }
+  .badge {
+    margin-left: 6px;
+    padding: 1px 6px;
+    border: 1px solid #b26a00;
+    border-radius: 999px;
+    color: #b26a00;
+    font-size: 11px;
   }
   .editor label {
     display: flex;
