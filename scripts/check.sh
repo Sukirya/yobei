@@ -28,6 +28,10 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 echo "==> frontend: svelte-check"
 bun run check
 
+echo "==> browser extension: manifest + syntax"
+node -e "JSON.parse(require('fs').readFileSync('browser-extension/manifest.json','utf8'))"
+for f in browser-extension/*.js; do node --check "$f"; done
+
 echo "==> sync worker: typecheck"
 (cd workers/sync && bun run typecheck)
 

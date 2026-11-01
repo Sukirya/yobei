@@ -1,0 +1,161 @@
+body {
+  width: 320px;
+  margin: 0;
+  padding: 12px 14px 14px;
+  font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif;
+  color: #1f2937;
+  background: #fff;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 16px;
+}
+
+button {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #1f2937;
+  cursor: pointer;
+  font: inherit;
+}
+
+button:hover {
+  background: #f3f4f6;
+}
+
+button.primary {
+  width: 100%;
+  margin-top: 10px;
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #fff;
+}
+
+button.primary:hover {
+  background: #1d4ed8;
+}
+
+section {
+  margin-top: 8px;
+}
+
+.title {
+  margin: 8px 0 4px;
+  font-weight: 600;
+}
+
+.hint {
+  margin: 4px 0;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.message {
+  margin: 8px 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: #ecfdf5;
+  color: #065f46;
+}
+
+.message.error {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+label {
+  display: block;
+  margin-top: 8px;
+  font-size: 13px;
+  color: #374151;
+}
+
+input {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px 9px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font: inherit;
+}
+
+input:focus {
+  outline: 2px solid #93c5fd;
+  border-color: #2563eb;
+}
+
+.entries {
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.entries li {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.entries .entry {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.row button {
+  flex: 1;
+}
+
+.pending {
+  padding: 8px 10px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fffbeb;
+}
+
+.pending .row {
+  margin-top: 8px;
+}
+
+.pending .primary {
+  margin-top: 0;
+}
+
+.generated {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.generated code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #f3f4f6;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -185,6 +185,18 @@ const en = {
   "sync.done":
     "Sync done: pushed {pushed}, pulled {new} new / {updated} updated, conflicts {conflicts} (copies {copies}), discarded {discarded}",
 
+  "extension.title": "Browser extension",
+  "extension.running": "Extension API running on port {port}",
+  "extension.notRunning": "Extension API is not running (desktop only)",
+  "extension.token": "Pairing token",
+  "extension.copyToken": "Copy token",
+  "extension.copied": "Copied",
+  "extension.regenerate": "Regenerate token",
+  "extension.regenerateConfirm":
+    "Regenerate the token? Extensions paired with the old token will stop working until re-paired.",
+  "extension.hint":
+    "Closing this window keeps Yobei in the tray, so the extension keeps working. Lock from the tray menu or the extension to stop it.",
+
   "error.passwordMismatch": "The two passwords do not match.",
 } as const;
 
@@ -358,6 +370,18 @@ const zhCN: Record<MessageKey, string> = {
   "sync.revoked": "设备已撤销",
   "sync.done":
     "同步完成：推送 {pushed}，拉取新增 {new}、更新 {updated}，冲突 {conflicts}（副本 {copies}），丢弃 {discarded}",
+
+  "extension.title": "浏览器扩展",
+  "extension.running": "扩展接口运行中，端口 {port}",
+  "extension.notRunning": "扩展接口未运行（仅桌面端可用）",
+  "extension.token": "配对令牌",
+  "extension.copyToken": "复制令牌",
+  "extension.copied": "已复制",
+  "extension.regenerate": "重新生成令牌",
+  "extension.regenerateConfirm":
+    "重新生成令牌？已配对的扩展将失效，需要重新配对。",
+  "extension.hint":
+    "关闭本窗口后 Yobei 会留在托盘里，扩展可以继续使用。在托盘菜单或扩展里点锁定即可停止。",
 
   "error.passwordMismatch": "两次输入的主密码不一致",
 };

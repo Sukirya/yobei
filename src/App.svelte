@@ -197,6 +197,7 @@
       if (s.unlocked) {
         await refreshEntries();
         await refreshSyncStatus();
+        await refreshExtension();
       }
     }
     await refreshBiometric();
@@ -662,6 +663,49 @@
       });
       await refreshEntries();
       await refreshSyncStatus();
+    }
+  }
+
+  // --- browser extension (ADR-0011) ---
+  interface ExtensionStatus {
+    running: boolean;
+    port: number | null;
+  }
+  let extStatus = $state<ExtensionStatus | null>(null);
+  let extToken = $state("");
+  let extCopied = $state(false);
+
+  async function refreshExtension() {
+    const s = await run(() => invoke<ExtensionStatus>("extension_status"));
+    if (s) {
+      extStatus = s;
+      if (s.running) {
+        const tok = await run(() => invoke<string>("extension_token"));
+        if (tok) extToken = tok;
+      }
+    }
+  }
+
+  async function copyExtToken() {
+    if (!extToken) return;
+    try {
+      await navigator.clipboard.writeText(extToken);
+    } catch {
+      // Clipboard API may be unavailable; fall back to a selectable field.
+      const el = document.getElementById("ext-token") as HTMLInputElement | null;
+      el?.select();
+      document.execCommand("copy");
+    }
+    extCopied = true;
+    setTimeout(() => (extCopied = false), 2000);
+  }
+
+  async function regenerateExtToken() {
+    if (!confirm(t("extension.regenerateConfirm"))) return;
+    const tok = await run(() => invoke<string>("extension_regenerate_token"));
+    if (tok) {
+      extToken = tok;
+      extCopied = false;
     }
   }
 
@@ -1227,6 +1271,29 @@
           <p class="warn">{t("sync.deployWarning")}</p>
         {/if}
         {#if syncMsg}<p>{syncMsg}</p>{/if}
+      </section>
+
+      <section class="editor">
+        <h2>{t("extension.title")}</h2>
+        {#if extStatus?.running}
+          <p>{t("extension.running", { port: extStatus.port ?? 0 })}</p>
+          <label>
+            {t("extension.token")}
+            <input id="ext-token" type="text" readonly value={extToken} />
+          </label>
+          <div class="row">
+            <button onclick={copyExtToken}>
+              {extCopied ? t("extension.copied") : t("extension.copyToken")}
+            </button>
+            <button onclick={regenerateExtToken}>
+              {t("extension.regenerate")}
+            </button>
+            <button onclick={refreshExtension}>{t("sync.refresh")}</button>
+          </div>
+        {:else}
+          <p>{t("extension.notRunning")}</p>
+        {/if}
+        <p class="warn">{t("extension.hint")}</p>
       </section>
     </section>
   {/if}

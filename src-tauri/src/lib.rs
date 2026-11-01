@@ -18,19 +18,21 @@ use yobei_core::secretkey;
 use yobei_core::service::Service;
 use yobei_core::vault::Vault;
 
+mod extension_api;
+
 #[derive(Default)]
-struct AppState {
-    service: Mutex<Option<Service>>,
+pub(crate) struct AppState {
+    pub(crate) service: Mutex<Option<Service>>,
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
-fn vault_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn vault_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -66,7 +68,7 @@ fn validate_server_url(url: &str) -> Result<String, String> {
     }
 }
 
-fn with_service<T>(
+pub(crate) fn with_service<T>(
     state: &State<'_, AppState>,
     f: impl FnOnce(&mut Service) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -166,32 +168,50 @@ fn create_vault(
     })
 }
 
-#[tauri::command]
-fn unlock_vault(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    password: String,
-    secret_key: String,
+/// Unlock shared by the `unlock_vault` command and the browser-extension
+/// API (ADR-0011): daily unlock needs only the master password (ADR-0010);
+/// the Secret Key is optional here and only required for unmigrated vaults
+/// or as the recovery path.
+pub(crate) fn unlock_vault_inner(
+    app: &AppHandle,
+    password: &str,
+    secret_key: &str,
 ) -> Result<String, String> {
-    let path = vault_path(&app)?;
+    let path = vault_path(app)?;
     Vault::peek_header(&path).ok_or_else(|| "no vault found".to_string())?;
-    // Daily unlock needs only the master password (ADR-0010); the Secret
-    // Key is optional here and only required for unmigrated vaults or as
-    // the recovery path.
     let secret_key_bytes = if secret_key.trim().is_empty() {
         None
     } else {
-        Some(parse_secret_key(&secret_key)?)
+        Some(parse_secret_key(secret_key)?)
     };
-    let vault = Vault::open(&path, &password, secret_key_bytes.as_deref())?;
+    let vault = Vault::open(&path, password, secret_key_bytes.as_deref())?;
     let service = Service::new(vault);
     let vault_id = service.vault_id().to_string();
+    let state = app.state::<AppState>();
     let mut guard = state
         .service
         .lock()
         .map_err(|_| "app state poisoned".to_string())?;
     *guard = Some(service);
     Ok(vault_id)
+}
+
+#[tauri::command]
+fn unlock_vault(app: AppHandle, password: String, secret_key: String) -> Result<String, String> {
+    unlock_vault_inner(&app, &password, &secret_key)
+}
+
+/// Lock shared by the `lock_vault` command, the tray menu and the
+/// browser-extension API: dropping the Service drops (and zeroizes) the
+/// vault key. The process keeps running, so the extension API stays up.
+pub(crate) fn lock_vault_inner(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut guard = state
+        .service
+        .lock()
+        .map_err(|_| "app state poisoned".to_string())?;
+    *guard = None;
+    Ok(())
 }
 
 /// Join an existing vault on this device using only the recovery kit
@@ -250,13 +270,31 @@ fn join_vault(
 }
 
 #[tauri::command]
-fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state
-        .service
-        .lock()
-        .map_err(|_| "app state poisoned".to_string())?;
-    *guard = None; // dropping the Service drops (and zeroizes) the vault key
-    Ok(())
+fn lock_vault(app: AppHandle) -> Result<(), String> {
+    lock_vault_inner(&app)
+}
+
+// ------------------------------------------- browser extension (ADR-0011) ---
+
+/// Local extension API state (desktop only; elsewhere `running` is false).
+#[tauri::command]
+fn extension_status(app: AppHandle) -> extension_api::ExtensionStatus {
+    extension_api::status(&app)
+}
+
+/// The pairing token the browser extension needs. Shown in the UI so the
+/// user can copy it into the extension once; it is a bearer token for the
+/// loopback API only.
+#[tauri::command]
+fn extension_token(app: AppHandle) -> Result<String, String> {
+    extension_api::token(&app)
+}
+
+/// Invalidate the current pairing token and issue a new one. Extensions
+/// holding the old token stop working until re-paired.
+#[tauri::command]
+fn extension_regenerate_token(app: AppHandle) -> Result<String, String> {
+    extension_api::regenerate_token(&app)
 }
 
 // ------------------------------------------------------- biometric unlock ---
@@ -835,12 +873,33 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_yobei_biometric::init())
         .manage(AppState::default())
+        .setup(|app| {
+            let api = extension_api::load_or_create(app.handle());
+            app.manage(api);
+            extension_api::start_server(app.handle().clone());
+            #[cfg(desktop)]
+            setup_tray(app.handle())?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Desktop only: closing the window hides it to the tray instead
+            // of quitting, so the browser extension keeps working (ADR-0011).
+            // Only the tray menu's Quit really exits.
+            #[cfg(desktop)]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             vault_status,
             create_vault,
             unlock_vault,
             join_vault,
             lock_vault,
+            extension_status,
+            extension_token,
+            extension_regenerate_token,
             biometric_status,
             biometric_enable,
             biometric_unlock,
@@ -873,4 +932,54 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// System tray (desktop only, ADR-0011): 打开 / 锁定 / 退出. Left-click
+/// shows the window; right-click shows the menu.
+#[cfg(desktop)]
+fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let show = MenuItemBuilder::with_id("show", "打开 Yobei").build(app)?;
+    let lock = MenuItemBuilder::with_id("lock", "锁定").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+    let menu = MenuBuilder::new(app)
+        .items(&[&show, &lock, &quit])
+        .build()?;
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+    let _tray = TrayIconBuilder::with_id("main")
+        .icon(icon)
+        .tooltip("Yobei")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            "lock" => {
+                let _ = lock_vault_inner(app);
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+        })
+        .build(app)?;
+    Ok(())
 }

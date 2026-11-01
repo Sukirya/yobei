@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Yobei</h1>
+      <button id="settingsToggle" type="button" title="设置">设置</button>
+    </header>
+
+    <p id="message" class="message" hidden></p>
+
+    <!-- (a) 桌面端未运行 -->
+    <section id="viewUnreachable" hidden>
+      <p class="title">桌面端未运行</p>
+      <p class="hint">
+        请先打开 Yobei 桌面端。关闭窗口后它会留在托盘里继续运行，扩展才能连接。
+      </p>
+      <p class="hint">如果桌面端已经在运行，请检查下面的端口和令牌是否正确。</p>
+    </section>
+
+    <!-- (b) 保险库已锁定 -->
+    <section id="viewLocked" hidden>
+      <p class="title">保险库已锁定</p>
+      <label>
+        主密码
+        <input id="unlockPassword" type="password" autocomplete="current-password" />
+      </label>
+      <label>
+        Secret Key（可选，首次解锁需要）
+        <input id="unlockSecretKey" type="password" autocomplete="off" />
+      </label>
+      <button id="unlockBtn" type="button" class="primary">解锁</button>
+    </section>
+
+    <!-- (c) 已解锁 -->
+    <section id="viewUnlocked" hidden>
+      <div id="pendingSave" class="pending" hidden>
+        <p class="title">保存新登录？</p>
+        <p id="pendingSaveText" class="hint"></p>
+        <div class="row">
+          <button id="pendingSaveBtn" type="button" class="primary">保存</button>
+          <button id="pendingDiscardBtn" type="button">丢弃</button>
+        </div>
+      </div>
+
+      <p class="title">此网站的账号</p>
+      <ul id="entryList" class="entries"></ul>
+      <p id="noEntries" class="hint" hidden>这个网站没有保存的账号。</p>
+
+      <div class="row">
+        <button id="generateBtn" type="button">生成密码</button>
+        <button id="lockBtn" type="button">锁定</button>
+      </div>
+      <div id="generated" class="generated" hidden>
+        <code id="generatedPassword"></code>
+        <button id="copyGeneratedBtn" type="button">复制</button>
+      </div>
+    </section>
+
+    <!-- 设置：所有状态下都可打开 -->
+    <section id="settings" hidden>
+      <p class="title">扩展设置</p>
+      <p class="hint">
+        令牌在桌面端 Yobei 的扩展设置页里查看和复制，粘贴到这里一次即可。
+      </p>
+      <label>
+        桌面端端口
+        <input id="portInput" type="number" min="1" max="65535" inputmode="numeric" />
+      </label>
+      <label>
+        令牌
+        <input id="tokenInput" type="password" autocomplete="off" />
+      </label>
+      <button id="saveSettingsBtn" type="button" class="primary">保存设置</button>
+    </section>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

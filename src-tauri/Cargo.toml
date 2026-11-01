@@ -19,7 +19,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-yobei-biometric = { path = "../crates/tauri-plugin-yobei-biometric" }
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +27,11 @@ serde_json = "1"
 yobei-core = { path = "../crates/yobei-core" }
 ureq = { version = "2", features = ["json"] }
 data-encoding = "2"
+# Local HTTP API for the browser extension (ADR-0011): loopback only,
+# token-authenticated. tiny_http keeps the server single-threaded and
+# synchronous, matching the ureq style used elsewhere in the shell.
+tiny_http = "0.12"
+getrandom = "0.3"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
