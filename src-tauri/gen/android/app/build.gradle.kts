@@ -3,9 +3,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
-    // No kotlin-android plugin: AGP 9 has built-in Kotlin support and
-    // applying the Kotlin Gradle Plugin is now an error. The kotlin {}
-    // block below still works; AGP provides it.
+    id("org.jetbrains.kotlin.android")
     id("rust")
 }
 
