@@ -26,5 +26,6 @@
 | [0009](0009-biometric-device-key.md) | 生物识别解锁的设备密钥实现 | 已采纳 | — |
 | [0010](0010-password-only-unlock.md) | 日常解锁只用主密码 | 已采纳 | ADR-0001 的“解锁强制 Secret Key”（仅解锁路径） |
 | [0011](0011-desktop-tray-and-browser-extension.md) | 桌面端（托盘常驻）与浏览器扩展 | 已采纳 | — |
+| [0012](0012-vault-header-key-check.md) | 库头存 Vault Key 指纹，生物识别过期检查不再空洞 | 已采纳 | ADR-0009 的 `open_with_key` 检查语义 |
 
 > 本目录中的决策优先于 `docs/DESIGN.md` 的 v0 草稿。冲突时以 ADR 为准。

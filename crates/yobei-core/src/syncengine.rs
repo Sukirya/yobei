@@ -302,6 +302,15 @@ fn resolve_push_conflict(
             }
             report.conflicts += 1;
             service.vault_mut().remove_ops_for_entry(entry_id)?;
+            // Without this the entry is stranded: it stays at version N,
+            // so the next edit conflicts again against the server's 0,
+            // forever. Re-push it as a new entry (base version 0); the
+            // next sync delivers it. The conflict copy above stays as the
+            // visible record of the clash (ADR-0003).
+            if let Some(mut entry) = service.get_entry(entry_id)? {
+                entry.version = 0;
+                service.save_entry(&mut entry, now_ms)?;
+            }
         }
     }
     Ok(())
@@ -512,6 +521,38 @@ mod tests {
         sync_now(&mut b, &tb, 8_000).unwrap();
         sync_now(&mut a, &ta, 9_000).unwrap();
         assert_eq!(a.search("", false).unwrap().len(), 2);
+        let _ = std::fs::remove_file(&pa);
+        let _ = std::fs::remove_file(&pb);
+    }
+
+    #[test]
+    fn entry_repushed_when_server_loses_its_record() {
+        let (mut a, _b, server, pa, pb) = two_devices("lost-record");
+        let ta = FakeTransport {
+            server: server.clone(),
+        };
+
+        let mut entry = a
+            .create_entry(EntryKind::Account, "GitHub".into(), 1_000)
+            .unwrap();
+        sync_now(&mut a, &ta, 2_000).unwrap(); // server has it at version 1
+
+        // Server data loss: the record disappears.
+        server.borrow_mut().records.remove(&entry.id);
+
+        // A local edit, then push: the server has no record, so it conflicts.
+        entry.title = "GitHub (edited)".into();
+        a.save_entry(&mut entry, 3_000).unwrap();
+        let report = sync_now(&mut a, &ta, 4_000).unwrap();
+        assert_eq!(report.conflicts, 1);
+        assert_eq!(report.conflict_copies, 1);
+
+        // The next sync must push the entry again instead of conflicting
+        // forever.
+        let report = sync_now(&mut a, &ta, 5_000).unwrap();
+        assert_eq!(report.conflicts, 0);
+        assert_eq!(report.pushed, 2); // the entry (re-pushed as new) + its copy
+        assert!(server.borrow().records.contains_key(&entry.id));
         let _ = std::fs::remove_file(&pa);
         let _ = std::fs::remove_file(&pb);
     }

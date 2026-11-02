@@ -88,6 +88,14 @@ pub struct VaultHeader {
     /// upload it without keeping the Secret Key in memory.
     #[serde(default)]
     pub bootstrap_package: Option<Vec<u8>>,
+    /// Fingerprint of this vault's key (ADR-0012), written at creation and
+    /// backfilled on the next unlock with the Secret Key. `open_with_key`
+    /// compares the presented check against this value, so a
+    /// self-consistent key+check pair from another vault is rejected
+    /// instead of opening this vault under the wrong key. Absent on
+    /// vaults created before this existed.
+    #[serde(default)]
+    pub vault_key_check: Option<Vec<u8>>,
 }
 
 /// Sync-relevant metadata of one stored row (no decryption needed).
@@ -169,8 +177,9 @@ impl Vault {
 
     /// Fingerprint of a vault key: SHA-256 of the auth key (ADR-0002), the
     /// same value the sync server stores. A platform adapter records it
-    /// next to a stored vault key so `open_with_key` can tell a stale key
-    /// from the right one. It is one-way: it cannot recover the vault key.
+    /// next to a stored vault key, and the vault header records it too
+    /// (ADR-0012), so `open_with_key` can tell a stale key from the right
+    /// one. It is one-way: it cannot recover the vault key.
     pub fn vault_key_check(vault_key: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN], String> {
         let auth = crate::bootstrap::derive_auth_key(vault_key)?;
         Ok(crate::bootstrap::auth_key_hash(&auth))
@@ -233,6 +242,7 @@ impl Vault {
                 created_at_ms: now_ms,
                 sync_address: Some(sync_address),
                 bootstrap_package: None,
+                vault_key_check: Some(Self::vault_key_check(&vault_key_bytes)?.to_vec()),
             };
             let package = Self::seal_package(&header, secret_key)?;
             header.bootstrap_package = Some(package);
@@ -347,6 +357,13 @@ impl Vault {
                         Some(keys::wrap_key(&pw_kek, &vault_key)?);
                     dirty = true;
                 }
+                // Migration (ADR-0012): record the vault key check in the
+                // header so open_with_key can tell a stale key from the
+                // right one.
+                if header.vault_key_check.is_none() {
+                    header.vault_key_check = Some(Self::vault_key_check(&vault_key)?.to_vec());
+                    dirty = true;
+                }
                 vault_key
             }
             None => {
@@ -379,12 +396,15 @@ impl Vault {
     /// the device keystore. Skips the password KDF entirely.
     ///
     /// `key_check` is the fingerprint from `vault_key_check`, recorded when
-    /// the key was stored; it proves the key belongs to *this* vault, so a
-    /// stale blob (vault recreated after the blob was written) fails loudly
-    /// here instead of opening the vault under the wrong key. The sync
-    /// address / bootstrap package are left untouched: they were written at
-    /// creation and only repaired on a password unlock, which has the
-    /// Secret Key.
+    /// the key was stored. Two checks: the key must be self-consistent
+    /// with the check, and — when the header carries one (ADR-0012) — the
+    /// check must match the header's. The second check is what proves the
+    /// key belongs to *this* vault: a self-consistent pair from another
+    /// vault is rejected here, so a stale blob (vault recreated after the
+    /// blob was written) fails loudly instead of opening the vault under
+    /// the wrong key. The sync address / bootstrap package are left
+    /// untouched: they were written at creation and only repaired on a
+    /// password unlock, which has the Secret Key.
     pub fn open_with_key(
         path: &Path,
         vault_key: &[u8; KEY_LEN],
@@ -394,6 +414,15 @@ impl Vault {
             return Err("biometric key does not match this vault".to_string());
         }
         let (conn, header) = Self::open_db(path)?;
+        // The header records the check (ADR-0012): a self-consistent pair
+        // from another vault must not open this one. Vaults created before
+        // the header carried the check have none; they gain it on the next
+        // unlock with the Secret Key.
+        if let Some(stored) = &header.vault_key_check {
+            if stored.as_slice() != key_check {
+                return Err("biometric key does not match this vault".to_string());
+            }
+        }
         Self::ensure_sync_schema(&conn)?;
         Ok(Vault {
             conn,
@@ -446,6 +475,7 @@ impl Vault {
             created_at_ms: wire.created_at_ms,
             sync_address: Some(address.to_string()),
             bootstrap_package: Some(bootstrap.to_vec()),
+            vault_key_check: Some(Self::vault_key_check(&vault_key)?.to_vec()),
         };
         // Any failure below must remove the partial file (see create).
         let stored: Result<(), String> = (|| {
@@ -1046,6 +1076,69 @@ mod tests {
         let mut bad_check = check;
         bad_check[0] ^= 1;
         assert!(Vault::open_with_key(&path, &key, &bad_check).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_with_key_rejects_a_self_consistent_pair_from_another_vault() {
+        // A key+check pair recorded for vault B must not open vault A,
+        // even though the pair is self-consistent (ADR-0012).
+        let path_a = temp_vault_path("check-a");
+        let path_b = temp_vault_path("check-b");
+        let sk_a = keys::random_bytes(KEY_LEN);
+        let sk_b = keys::random_bytes(KEY_LEN);
+        let vault_a = Vault::create(&path_a, "pw", Some(&sk_a), test_profile(), 0).unwrap();
+        drop(vault_a);
+        let vault_b = Vault::create(&path_b, "pw", Some(&sk_b), test_profile(), 0).unwrap();
+        let key_b = *vault_b.vault_key();
+        let check_b = Vault::vault_key_check(&key_b).unwrap();
+        drop(vault_b);
+
+        assert!(Vault::open_with_key(&path_a, &key_b, &check_b).is_err());
+        // ...and vault B still opens with its own pair.
+        assert!(Vault::open_with_key(&path_b, &key_b, &check_b).is_ok());
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    #[test]
+    fn vault_key_check_is_backfilled_from_old_header() {
+        // Simulate a vault created before ADR-0012: strip the check from
+        // the stored header.
+        let path = temp_vault_path("migrate-check");
+        let sk = keys::random_bytes(KEY_LEN);
+        let vault = Vault::create(&path, "pw", Some(&sk), test_profile(), 0).unwrap();
+        let key = *vault.vault_key();
+        let check = Vault::vault_key_check(&key).unwrap();
+        drop(vault);
+        {
+            let conn = Connection::open(&path).unwrap();
+            let json: String = conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key = ?1",
+                    params![HEADER_META_KEY],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            value.as_object_mut().unwrap().remove("vault_key_check");
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE key = ?2",
+                params![value.to_string(), HEADER_META_KEY],
+            )
+            .unwrap();
+        }
+        // Before migration the header has no check, so only the
+        // self-consistency layer applies...
+        assert!(Vault::open_with_key(&path, &key, &check).is_ok());
+        // ...one unlock with the Secret Key backfills it...
+        let vault = Vault::open(&path, "pw", Some(&sk)).unwrap();
+        drop(vault);
+        // ...and now a foreign pair is rejected.
+        let other_key: [u8; KEY_LEN] = keys::random_bytes(KEY_LEN).try_into().unwrap();
+        let other_check = Vault::vault_key_check(&other_key).unwrap();
+        assert!(Vault::open_with_key(&path, &other_key, &other_check).is_err());
+        assert!(Vault::open_with_key(&path, &key, &check).is_ok());
         let _ = std::fs::remove_file(&path);
     }
 

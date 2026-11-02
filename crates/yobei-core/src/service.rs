@@ -6,12 +6,16 @@
 
 use data_encoding::BASE64;
 
-use crate::entry::{Entry, EntryKind, EntryPayload};
+use crate::entry::{Entry, EntryKind, EntryPayload, PasswordHistoryEntry};
 use crate::sync::SyncOp;
 use crate::vault::Vault;
 
 /// How long a deleted entry stays restorable (ADR-0003 §4).
 pub const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Password history keeps the last few overwritten passwords (ADR-0005),
+/// newest first.
+const PASSWORD_HISTORY_LIMIT: usize = 5;
 
 /// Advance an entry's mutation metadata. Every mutation bumps `version`
 /// by exactly 1 (sync conflict detection depends on it) and sets `hlc`
@@ -87,10 +91,47 @@ impl Service {
 
     /// Save an edited entry: applies touch discipline, then persists.
     pub fn save_entry(&mut self, entry: &mut Entry, now_ms: i64) -> Result<Entry, String> {
+        self.record_password_history(entry, now_ms)?;
         let base_version = entry.version;
         touch(entry, now_ms);
         self.put_and_enqueue(entry, base_version, now_ms)?;
         Ok(entry.clone())
+    }
+
+    /// Overwriting an existing password must retain the old value
+    /// (ADR-0005). The stored row is read here, inside core, so both the
+    /// desktop editor and the extension save path get it for free.
+    fn record_password_history(&mut self, entry: &mut Entry, now_ms: i64) -> Result<(), String> {
+        let EntryPayload::Account(account) = &mut entry.payload else {
+            return Ok(());
+        };
+        let Some(new_password) = account.password.clone() else {
+            return Ok(());
+        };
+        let Some(stored) = self.get_entry(&entry.id)? else {
+            return Ok(());
+        };
+        let EntryPayload::Account(stored_account) = stored.payload else {
+            return Ok(());
+        };
+        let Some(old_password) = stored_account.password else {
+            return Ok(());
+        };
+        if old_password == new_password {
+            return Ok(());
+        }
+        account
+            .password_history
+            .retain(|h| h.password != old_password);
+        account.password_history.insert(
+            0,
+            PasswordHistoryEntry {
+                password: old_password,
+                changed_at_ms: now_ms,
+            },
+        );
+        account.password_history.truncate(PASSWORD_HISTORY_LIMIT);
+        Ok(())
     }
 
     /// Persist an entry and enqueue its sync op in the outbox. Entry and op
@@ -346,6 +387,56 @@ mod tests {
         let tombstone = svc.get_entry(&gh.id).unwrap().unwrap();
         assert!(tombstone.deleted);
         assert!(svc.restore(&gh.id, 7_000 + TRASH_RETENTION_MS + 1).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn changing_a_password_records_the_old_one_in_history() {
+        let (mut svc, path) = test_service("pw-history");
+        let mut gh = svc
+            .create_entry(EntryKind::Account, "GitHub".into(), 1_000)
+            .unwrap();
+        let set_password = |e: &mut Entry, pw: &str| {
+            if let EntryPayload::Account(a) = &mut e.payload {
+                a.password = Some(pw.into());
+            }
+        };
+        let history = |svc: &Service, id: &str| -> Vec<PasswordHistoryEntry> {
+            let stored = svc.get_entry(id).unwrap().unwrap();
+            let EntryPayload::Account(a) = stored.payload else {
+                panic!("not an account");
+            };
+            a.password_history
+        };
+
+        set_password(&mut gh, "first");
+        svc.save_entry(&mut gh, 2_000).unwrap();
+        assert!(history(&svc, &gh.id).is_empty());
+
+        set_password(&mut gh, "second");
+        svc.save_entry(&mut gh, 3_000).unwrap();
+        set_password(&mut gh, "third");
+        svc.save_entry(&mut gh, 4_000).unwrap();
+        let h = history(&svc, &gh.id);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].password, "second");
+        assert_eq!(h[0].changed_at_ms, 4_000);
+        assert_eq!(h[1].password, "first");
+        assert_eq!(h[1].changed_at_ms, 3_000);
+
+        // Saving without changing the password adds nothing.
+        svc.save_entry(&mut gh, 5_000).unwrap();
+        assert_eq!(history(&svc, &gh.id).len(), 2);
+
+        // History is capped, newest first.
+        for i in 0..6 {
+            set_password(&mut gh, &format!("pw{i}"));
+            svc.save_entry(&mut gh, 6_000 + i).unwrap();
+        }
+        let h = history(&svc, &gh.id);
+        assert_eq!(h.len(), PASSWORD_HISTORY_LIMIT);
+        assert_eq!(h[0].password, "pw4");
+        assert_eq!(h[4].password, "pw0");
         let _ = std::fs::remove_file(&path);
     }
 

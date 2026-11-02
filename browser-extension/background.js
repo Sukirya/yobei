@@ -3,6 +3,8 @@
 
 const DEFAULT_PORT = 19445;
 const PENDING_SAVE_KEY = "pendingSave";
+// 待保存登录里的明文密码最多留一天（ADR-0011：扩展只存 token）。
+const PENDING_SAVE_TTL_MS = 24 * 60 * 60 * 1000;
 
 async function getSettings() {
   const { token = "", port = DEFAULT_PORT } = await chrome.storage.local.get([
@@ -11,6 +13,26 @@ async function getSettings() {
   ]);
   return { token, port: Number(port) || DEFAULT_PORT };
 }
+
+// 读待保存登录：超过一天的直接丢掉，不让明文密码在扩展存储里无限期躺着。
+async function getPendingSave() {
+  const { [PENDING_SAVE_KEY]: pending = null } =
+    await chrome.storage.local.get(PENDING_SAVE_KEY);
+  if (!pending) return null;
+  if (
+    typeof pending.savedAt !== "number" ||
+    Date.now() - pending.savedAt > PENDING_SAVE_TTL_MS
+  ) {
+    await chrome.storage.local.remove(PENDING_SAVE_KEY);
+    return null;
+  }
+  return pending;
+}
+
+// 待保存登录只是下次打开弹窗时的一次提醒，浏览器重启就不再留着。
+chrome.runtime.onStartup.addListener(() => {
+  chrome.storage.local.remove(PENDING_SAVE_KEY);
+});
 
 // 调桌面端 API。path 含前导斜杠。ping 不需要认证，其余接口带 Bearer token。
 async function api(path, { method = "GET", body = null, auth = true } = {}) {
@@ -149,8 +171,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           break;
         }
         case "getPendingSave": {
-          const { [PENDING_SAVE_KEY]: pendingSave = null } =
-            await chrome.storage.local.get(PENDING_SAVE_KEY);
+          const pendingSave = await getPendingSave();
           sendResponse({ ok: true, pendingSave });
           break;
         }
